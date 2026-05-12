@@ -1,4 +1,4 @@
-var OVERLAY_LABEL = "browser-page";
+var PAGE_WEBVIEW_LABEL = "page";
 
 var form = document.querySelector("#browser-form");
 var addressInput = document.querySelector("#address");
@@ -17,7 +17,7 @@ var errorDetail = document.querySelector("#error-detail");
 var errorRetry = document.querySelector("#error-retry");
 var toolbar = document.querySelector("#toolbar");
 
-var overlay = null;
+var pageWebView = null;
 var currentUrl = "";
 var navHistory = [];
 var historyIndex = -1;
@@ -73,14 +73,30 @@ function normalizeUrl(value) {
   return "https://" + trimmed;
 }
 
-function overlayFrame() {
+function pageFrame() {
   var rect = toolbar.getBoundingClientRect();
   var top = Math.ceil(rect.height);
+  top = Math.min(top, Math.max(0, window.innerHeight - 1));
   return {
     x: 0,
     y: top,
     width: Math.max(1, Math.floor(window.innerWidth)),
     height: Math.max(1, Math.floor(window.innerHeight - top)),
+  };
+}
+
+function chromeFrame() {
+  var toolbarRect = toolbar.getBoundingClientRect();
+  var height = Math.ceil(toolbarRect.height);
+  if (!suggestions.hidden) {
+    var suggestionsRect = suggestions.getBoundingClientRect();
+    height = Math.max(height, Math.ceil(suggestionsRect.bottom + 8));
+  }
+  return {
+    x: 0,
+    y: 0,
+    width: Math.max(1, Math.floor(window.innerWidth)),
+    height: Math.max(1, Math.min(height, window.innerHeight)),
   };
 }
 
@@ -149,6 +165,7 @@ function renderSuggestions(query) {
   suggestActive = -1;
   if (suggestFiltered.length === 0) {
     suggestions.hidden = true;
+    scheduleResize();
     return;
   }
   var html = "";
@@ -166,12 +183,15 @@ function renderSuggestions(query) {
   }
   suggestions.innerHTML = html;
   suggestions.hidden = false;
+  scheduleResize();
 }
 
 function hideSuggestions() {
+  var wasVisible = !suggestions.hidden;
   suggestions.hidden = true;
   suggestActive = -1;
   suggestFiltered = [];
+  if (wasVisible) scheduleResize();
 }
 
 function setSuggestActive(index) {
@@ -211,14 +231,14 @@ function hideError() {
 }
 
 async function closeOverlay() {
-  if (!overlay) return;
+  if (!pageWebView) return;
   try {
-    await overlay.close();
+    await pageWebView.close();
   } catch (error) {
     console.error("Failed to close page WebView", error);
     setStatus(error && error.message ? error.message : "Failed to close page WebView", 3000);
   }
-  overlay = null;
+  pageWebView = null;
 }
 
 // ── Navigation ──
@@ -234,17 +254,21 @@ async function probeUrl(url) {
 }
 
 async function ensureOverlay(url) {
-  var frame = overlayFrame();
-  if (!overlay) {
-    overlay = await window.zero.webviews.create({
-      label: OVERLAY_LABEL,
+  var frame = pageFrame();
+  if (!pageWebView) {
+    await window.zero.webviews.setFrame({ label: "main", frame: chromeFrame() });
+    pageWebView = await window.zero.webviews.create({
+      label: PAGE_WEBVIEW_LABEL,
       url: url,
       frame: frame,
+      layer: 0,
+      transparent: false,
+      bridge: false,
     });
     emptyState.hidden = true;
   } else {
-    await overlay.setFrame(frame);
-    await overlay.navigate(url);
+    await pageWebView.setFrame(frame);
+    await pageWebView.navigate(url);
   }
 }
 
@@ -290,9 +314,10 @@ function scheduleResize() {
   if (resizeHandle) cancelAnimationFrame(resizeHandle);
   resizeHandle = requestAnimationFrame(async function () {
     resizeHandle = 0;
-    if (!overlay) return;
+    if (!pageWebView) return;
     try {
-      await overlay.setFrame(overlayFrame());
+      await window.zero.webviews.setFrame({ label: "main", frame: chromeFrame() });
+      await pageWebView.setFrame(pageFrame());
     } catch (error) {
       setStatus(error.message || "Failed to resize page WebView");
     }
@@ -383,9 +408,9 @@ errorRetry.addEventListener("click", function () {
 
 async function applyZoom(level) {
   zoomLevel = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(level * 100) / 100));
-  if (!overlay) return;
+  if (!pageWebView) return;
   try {
-    await overlay.setZoom(zoomLevel);
+    await pageWebView.setZoom(zoomLevel);
     var pct = Math.round(zoomLevel * 100);
     setStatus(pct + "%", 1200);
   } catch (error) {

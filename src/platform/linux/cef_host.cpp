@@ -263,7 +263,7 @@ int zero_native_gtk_close_window(Host *host, uint64_t window_id) {
     return 1;
 }
 
-int zero_native_gtk_create_overlay(Host *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height) {
+int zero_native_gtk_create_overlay(Host *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
     (void)host;
     (void)window_id;
     (void)label;
@@ -274,6 +274,9 @@ int zero_native_gtk_create_overlay(Host *host, uint64_t window_id, const char *l
     (void)y;
     (void)width;
     (void)height;
+    (void)layer;
+    (void)transparent;
+    (void)bridge_enabled;
     return 0;
 }
 
@@ -305,6 +308,15 @@ int zero_native_gtk_set_overlay_zoom(Host *host, uint64_t window_id, const char 
     (void)label;
     (void)label_len;
     (void)zoom;
+    return 0;
+}
+
+int zero_native_gtk_set_overlay_layer(Host *host, uint64_t window_id, const char *label, size_t label_len, int layer) {
+    (void)host;
+    (void)window_id;
+    (void)label;
+    (void)label_len;
+    (void)layer;
     return 0;
 }
 

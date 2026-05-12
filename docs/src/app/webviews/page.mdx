@@ -1,6 +1,10 @@
-# Overlay WebViews
+# Multiple WebViews
 
-Overlay WebViews let an app place an isolated native WebView above an existing window. They are useful for previews, auth flows, embedded docs, and other content that should not receive the app bridge.
+Zero models each native window as a stack of named WebViews. A WebView can fill the window, cover a panel-sized region, or sit above another WebView by setting its `frame` and `layer`.
+
+This is the right model for browser chrome, dashboards, previews, auth flows, and any app that needs trusted UI next to isolated page content.
+
+The startup app source is the default trusted WebView named `main`. Simple apps can ignore this and keep using one page. Advanced apps can resize `main` like any other WebView and place isolated child WebViews beneath or above it.
 
 ## JavaScript API
 
@@ -16,34 +20,44 @@ const app_permissions = [_][]const u8{zero_native.security.permission_window};
 .js_window_api = true,
 ```
 
-Then create and manage an overlay from JavaScript:
+Then create and manage WebViews from JavaScript:
 
 ```javascript
 const preview = await window.zero.webviews.create({
   label: "preview",
   url: "https://example.com",
   frame: { x: 24, y: 24, width: 480, height: 320 },
+  layer: 10,
+  transparent: false,
+  bridge: false,
 });
 
 await preview.setFrame({ x: 32, y: 32, width: 640, height: 420 });
 await preview.navigate("https://example.com/docs");
 await preview.setZoom(1.25);
+await preview.setLayer(20);
 await preview.close();
 ```
 
 Coordinates are logical content coordinates relative to the parent window: `x: 0, y: 0` is the top-left corner of the window content area.
 
-`windowId` defaults to the window that calls the command. If you pass it explicitly, it must match the calling window; one window cannot manage another window's overlays.
+`layer` controls native stacking. Higher layers appear above lower layers. DOM `z-index` only affects elements inside one WebView; it cannot place one WebView above another.
 
-You can also enable the same helpers with an explicit `builtin_bridge` policy instead of `js_window_api`. In that mode, list every overlay command your app calls: `zero-native.overlay.create`, `zero-native.overlay.setFrame`, `zero-native.overlay.navigate`, `zero-native.overlay.setZoom`, and `zero-native.overlay.close`.
+`transparent: true` requests a transparent native WebView background for chrome and menu surfaces. Support is backend dependent and best effort.
+
+`bridge: true` injects `window.zero` into that WebView. Use it only for trusted app chrome. Leave it `false` for untrusted page content.
+
+`windowId` defaults to the window that calls the command. If you pass it explicitly, it must match the calling window; one window cannot manage another window's WebViews.
+
+You can also enable the helpers with an explicit `builtin_bridge` policy instead of `js_window_api`. In that mode, list every WebView command your app calls: `zero-native.webview.create`, `zero-native.webview.list`, `zero-native.webview.setFrame`, `zero-native.webview.navigate`, `zero-native.webview.setZoom`, `zero-native.webview.setLayer`, and `zero-native.webview.close`.
 
 ## Lifecycle
 
-Overlay labels are unique per parent window. Creating a second overlay with the same label fails; close the existing overlay first if you want to replace it.
+WebView labels are unique per parent window. Creating a second WebView with the same label fails; close the existing WebView first if you want to replace it.
 
-When a parent window closes, its overlays are closed with it. Overlay pages do not receive `window.zero` by default, so untrusted content cannot call native bridge commands through the app bridge.
+When a parent window closes, its child WebViews are closed with it. Child WebViews do not receive `window.zero` by default, so untrusted content cannot call native bridge commands through the app bridge.
 
-Overlay slots are capped globally per runtime, not per window. The default cap is 16 overlays.
+WebView slots are capped globally per runtime, not per window. The default cap is 16 child WebViews.
 
 ## Commands
 
@@ -60,34 +74,44 @@ The helper calls these built-in bridge commands internally:
   <tbody>
     <tr>
       <td><code>window.zero.webviews.create(options)</code> / <code>preview</code></td>
-      <td><code>zero-native.overlay.create</code></td>
-      <td>Create an overlay WebView in a parent window</td>
+      <td><code>zero-native.webview.create</code></td>
+      <td>Create a named WebView in a parent window</td>
+    </tr>
+    <tr>
+      <td><code>window.zero.webviews.list()</code></td>
+      <td><code>zero-native.webview.list</code></td>
+      <td>List WebViews in the calling window</td>
     </tr>
     <tr>
       <td><code>window.zero.webviews.setFrame(options)</code> / <code>preview.setFrame(frame)</code></td>
-      <td><code>zero-native.overlay.setFrame</code></td>
-      <td>Move or resize an overlay</td>
+      <td><code>zero-native.webview.setFrame</code></td>
+      <td>Move or resize a WebView</td>
     </tr>
     <tr>
       <td><code>window.zero.webviews.navigate(options)</code> / <code>preview.navigate(url)</code></td>
-      <td><code>zero-native.overlay.navigate</code></td>
-      <td>Navigate an overlay to a new URL</td>
+      <td><code>zero-native.webview.navigate</code></td>
+      <td>Navigate a WebView to a new URL</td>
     </tr>
     <tr>
       <td><code>window.zero.webviews.setZoom(options)</code> / <code>preview.setZoom(zoom)</code></td>
-      <td><code>zero-native.overlay.setZoom</code></td>
-      <td>Set overlay page zoom from <code>0.25</code> to <code>5.0</code></td>
+      <td><code>zero-native.webview.setZoom</code></td>
+      <td>Set page zoom from <code>0.25</code> to <code>5.0</code></td>
+    </tr>
+    <tr>
+      <td><code>window.zero.webviews.setLayer(options)</code> / <code>preview.setLayer(layer)</code></td>
+      <td><code>zero-native.webview.setLayer</code></td>
+      <td>Change native stack order</td>
     </tr>
     <tr>
       <td><code>window.zero.webviews.close(options)</code> / <code>preview.close()</code></td>
-      <td><code>zero-native.overlay.close</code></td>
-      <td>Close an overlay</td>
+      <td><code>zero-native.webview.close</code></td>
+      <td>Close a WebView</td>
     </tr>
   </tbody>
 </table>
 
-Overlay URLs are checked against the runtime navigation policy before native views are created or navigated. Add the target origin to `security.navigation.allowed_origins` before loading it.
+WebView URLs are checked against the runtime navigation policy before native views are created or navigated. Add the target origin to `security.navigation.allowed_origins` before loading it.
 
 ## Backend Support
 
-System WebView overlays are implemented on macOS and Linux, including page zoom. Windows overlays require WebView2; if WebView2 is unavailable, creating an overlay fails instead of showing a placeholder. Chromium/CEF overlay support is available on macOS, including page zoom. The Linux CEF host currently fails overlay creation until a real native CEF overlay implementation is wired in.
+System WebView stacks are implemented on macOS and Linux with layers, best-effort transparency, bridge-enabled trusted child WebViews, and page zoom. Windows support uses WebView2 with layers and zoom; transparency and bridge-enabled child WebViews are best effort as WebView2 support matures. macOS CEF supports layered child WebViews and zoom. Linux CEF explicitly fails WebView creation until real native CEF embedding is wired in.

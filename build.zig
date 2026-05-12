@@ -268,25 +268,25 @@ pub fn build(b: *std.Build) void {
         \\case "$response" in *'"ok":true'*) ;; *) echo "native.ping did not succeed: $response" >&2; exit 1 ;; esac
         \\case "$response" in *'pong from Zig'*) ;; *) echo "native.ping response was unexpected: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"overlay-create","command":"zero-native.overlay.create","payload":{"label":"smoke","url":"https://example.com","frame":{"x":24,"y":24,"width":320,"height":220}}}' > .zig-cache/zero-native-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-create","command":"zero-native.webview.create","payload":{"label":"smoke","url":"https://example.com","frame":{"x":24,"y":24,"width":320,"height":220}}}' > .zig-cache/zero-native-automation/command.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "overlay create did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"overlay-resize","command":"zero-native.overlay.setFrame","payload":{"label":"smoke","frame":{"x":36,"y":36,"width":420,"height":260}}}' > .zig-cache/zero-native-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-resize","command":"zero-native.webview.setFrame","payload":{"label":"smoke","frame":{"x":36,"y":36,"width":420,"height":260}}}' > .zig-cache/zero-native-automation/command.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "overlay resize did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"overlay-navigate","command":"zero-native.overlay.navigate","payload":{"label":"smoke","url":"https://example.com/?smoke=1"}}' > .zig-cache/zero-native-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-navigate","command":"zero-native.webview.navigate","payload":{"label":"smoke","url":"https://example.com/?smoke=1"}}' > .zig-cache/zero-native-automation/command.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "overlay navigate did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"overlay-close","command":"zero-native.overlay.close","payload":{"label":"smoke"}}' > .zig-cache/zero-native-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-close","command":"zero-native.webview.close","payload":{"label":"smoke"}}' > .zig-cache/zero-native-automation/command.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
@@ -325,25 +325,25 @@ pub fn build(b: *std.Build) void {
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*'pong from Zig'*) ;; *) echo "native.ping response was unexpected: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"overlay-create","command":"zero-native.overlay.create","payload":{"label":"smoke","url":"https://example.com","frame":{"x":24,"y":24,"width":320,"height":220}}}' > .zig-cache/zero-native-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-create","command":"zero-native.webview.create","payload":{"label":"smoke","url":"https://example.com","frame":{"x":24,"y":24,"width":320,"height":220}}}' > .zig-cache/zero-native-automation/command.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "cef overlay create did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"overlay-resize","command":"zero-native.overlay.setFrame","payload":{"label":"smoke","frame":{"x":36,"y":36,"width":420,"height":260}}}' > .zig-cache/zero-native-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-resize","command":"zero-native.webview.setFrame","payload":{"label":"smoke","frame":{"x":36,"y":36,"width":420,"height":260}}}' > .zig-cache/zero-native-automation/command.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "cef overlay resize did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"overlay-navigate","command":"zero-native.overlay.navigate","payload":{"label":"smoke","url":"https://example.com/?smoke=1"}}' > .zig-cache/zero-native-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-navigate","command":"zero-native.webview.navigate","payload":{"label":"smoke","url":"https://example.com/?smoke=1"}}' > .zig-cache/zero-native-automation/command.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"
         \\case "$response" in *'"ok":true'*) ;; *) echo "cef overlay navigate did not succeed: $response" >&2; exit 1 ;; esac
         \\rm -f "$response_file"
-        \\printf 'bridge %s\n' '{"id":"overlay-close","command":"zero-native.overlay.close","payload":{"label":"smoke"}}' > .zig-cache/zero-native-automation/command.txt
+        \\printf 'bridge %s\n' '{"id":"webview-close","command":"zero-native.webview.close","payload":{"label":"smoke"}}' > .zig-cache/zero-native-automation/command.txt
         \\attempts=0
         \\while [ "$attempts" -lt 50 ] && [ ! -s "$response_file" ]; do attempts=$((attempts + 1)); sleep 0.1; done
         \\response="$(cat "$response_file" 2>/dev/null || true)"

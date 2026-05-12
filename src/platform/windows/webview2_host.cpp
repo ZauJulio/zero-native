@@ -70,6 +70,9 @@ struct Overlay {
     double width = 0;
     double height = 0;
     double zoom = 1.0;
+    int layer = 0;
+    bool transparent = false;
+    bool bridge_enabled = false;
 #if ZERO_NATIVE_HAS_WEBVIEW2
     ComPtr<ICoreWebView2Controller> controller;
     ComPtr<ICoreWebView2> webview;
@@ -292,6 +295,19 @@ static bool createOverlayWebView(Host *host, const std::string &key) {
     return SUCCEEDED(hr);
 }
 #endif
+
+static void applyOverlayLayer(Host *host, uint64_t window_id, const std::string &label) {
+    if (!host) return;
+    auto found = host->overlays.find(overlayKey(window_id, label));
+    if (found == host->overlays.end() || !found->second.hwnd) return;
+    HWND insert_after = HWND_TOP;
+    for (auto &entry : host->overlays) {
+        const Overlay &candidate = entry.second;
+        if (candidate.window_id != window_id || candidate.label == label || !candidate.hwnd) continue;
+        if (candidate.layer <= found->second.layer) insert_after = candidate.hwnd;
+    }
+    SetWindowPos(found->second.hwnd, insert_after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
 
 static Host *hostFromWindow(HWND hwnd) {
     return reinterpret_cast<Host *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -533,7 +549,7 @@ int zero_native_windows_close_window(Host *host, uint64_t window_id) {
     return 1;
 }
 
-int zero_native_windows_create_overlay(Host *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height) {
+int zero_native_windows_create_overlay(Host *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
 #if !ZERO_NATIVE_HAS_WEBVIEW2
     (void)host;
     (void)window_id;
@@ -545,6 +561,9 @@ int zero_native_windows_create_overlay(Host *host, uint64_t window_id, const cha
     (void)y;
     (void)width;
     (void)height;
+    (void)layer;
+    (void)transparent;
+    (void)bridge_enabled;
     return 0;
 #else
     if (!host || label_len == 0 || url_len == 0 || !validOverlayFrame(x, y, width, height)) return 0;
@@ -579,7 +598,11 @@ int zero_native_windows_create_overlay(Host *host, uint64_t window_id, const cha
     overlay.y = y;
     overlay.width = width;
     overlay.height = height;
+    overlay.layer = layer;
+    overlay.transparent = transparent != 0;
+    overlay.bridge_enabled = bridge_enabled != 0;
     host->overlays[key] = overlay;
+    applyOverlayLayer(host, window_id, label_string);
     if (!createOverlayWebView(host, key)) {
         DestroyWindow(hwnd);
         host->overlays.erase(key);
@@ -649,6 +672,16 @@ int zero_native_windows_set_overlay_zoom(Host *host, uint64_t window_id, const c
     }
     return 1;
 #endif
+}
+
+int zero_native_windows_set_overlay_layer(Host *host, uint64_t window_id, const char *label, size_t label_len, int layer) {
+    if (!host || label_len == 0) return 0;
+    std::string label_string = slice(label, label_len);
+    auto found = host->overlays.find(overlayKey(window_id, label_string));
+    if (found == host->overlays.end() || !found->second.hwnd) return 0;
+    found->second.layer = layer;
+    applyOverlayLayer(host, window_id, label_string);
+    return 1;
 }
 
 int zero_native_windows_close_overlay(Host *host, uint64_t window_id, const char *label, size_t label_len) {

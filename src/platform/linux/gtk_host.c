@@ -16,6 +16,9 @@ typedef struct zero_native_gtk_overlay {
     double y;
     double width;
     double height;
+    int layer;
+    int transparent;
+    int bridge_enabled;
 } zero_native_gtk_overlay_t;
 
 typedef struct zero_native_gtk_window {
@@ -149,6 +152,22 @@ static void zero_native_apply_overlay_frame(zero_native_gtk_overlay_t *overlay) 
     gtk_widget_set_size_request(widget, zero_native_overlay_extent(overlay->width), zero_native_overlay_extent(overlay->height));
 }
 
+static void zero_native_reorder_overlays(zero_native_gtk_window_t *win) {
+    if (!win || !win->overlay_root) return;
+    GtkWidget *previous = NULL;
+    for (int pass = 0; pass < win->overlay_count; pass++) {
+        int best = -1;
+        for (int i = 0; i < win->overlay_count; i++) {
+            if (!win->overlays[i].web_view) continue;
+            if (previous && GTK_WIDGET(win->overlays[i].web_view) == previous) continue;
+            if (best < 0 || win->overlays[i].layer < win->overlays[best].layer) best = i;
+        }
+        if (best < 0) break;
+        gtk_widget_insert_after(GTK_WIDGET(win->overlays[best].web_view), GTK_WIDGET(win->overlay_root), previous);
+        previous = GTK_WIDGET(win->overlays[best].web_view);
+    }
+}
+
 static void zero_native_clear_overlay(zero_native_gtk_window_t *win, zero_native_gtk_overlay_t *overlay) {
     if (!overlay) return;
     if (overlay->web_view && win && win->overlay_root) {
@@ -271,10 +290,10 @@ static const char *zero_native_bridge_script(void) {
         "function ensureNumber(value,name){if(typeof value!=='number'||!isFinite(value)){throw new TypeError(name+' must be a finite number');}return value;}"
         "function validateOverlaySelector(options){if(options.label!=null){ensureString(options.label,'label');}if(options.windowId!=null&&(typeof options.windowId!=='number'||!isFinite(options.windowId)||options.windowId<0||Math.floor(options.windowId)!==options.windowId)){throw new TypeError('windowId must be a non-negative integer');}}"
         "function framePayload(options){options=options||{};validateOverlaySelector(options);var frame=options.frame||options;return {label:options.label,windowId:options.windowId,url:options.url,frame:{x:frame.x==null?0:ensureNumber(frame.x,'frame.x'),y:frame.y==null?0:ensureNumber(frame.y,'frame.y'),width:ensureNumber(frame.width,'frame.width'),height:ensureNumber(frame.height,'frame.height')}};}"
-        "function createPayload(options){options=options||{};ensureString(options.url,'url');return framePayload(options);}"
+        "function createPayload(options){options=options||{};ensureString(options.url,'url');var payload=framePayload(options);if(options.layer!=null){payload.layer=ensureNumber(options.layer,'layer');}if(options.transparent!=null){payload.transparent=!!options.transparent;}if(options.bridge!=null){payload.bridge=!!options.bridge;}return payload;}"
         "function navigatePayload(options){options=options||{};validateOverlaySelector(options);ensureString(options.url,'url');return {label:options.label,windowId:options.windowId,url:options.url};}"
         "function closePayload(options){options=options||{};validateOverlaySelector(options);return {label:options.label,windowId:options.windowId};}"
-        "function webviewHandle(info){return Object.freeze({label:info.label,windowId:info.windowId,setFrame:function(frame){return webviews.setFrame({label:info.label,windowId:info.windowId,frame:frame});},navigate:function(url){return webviews.navigate({label:info.label,windowId:info.windowId,url:url});},setZoom:function(zoom){return webviews.setZoom({label:info.label,windowId:info.windowId,zoom:zoom});},close:function(){return webviews.close({label:info.label,windowId:info.windowId});}});}"
+        "function webviewHandle(info){return Object.freeze(Object.assign({},info,{setFrame:function(frame){return webviews.setFrame({label:info.label,windowId:info.windowId,frame:frame});},navigate:function(url){return webviews.navigate({label:info.label,windowId:info.windowId,url:url});},setZoom:function(zoom){return webviews.setZoom({label:info.label,windowId:info.windowId,zoom:zoom});},setLayer:function(layer){return webviews.setLayer({label:info.label,windowId:info.windowId,layer:layer});},close:function(){return webviews.close({label:info.label,windowId:info.windowId});}}));}"
         "function on(name,callback){if(typeof callback!=='function'){throw new TypeError('callback must be a function');}var set=listeners.get(name);if(!set){set=new Set();listeners.set(name,set);}set.add(callback);return function(){off(name,callback);};}"
         "function off(name,callback){var set=listeners.get(name);if(set){set.delete(callback);if(set.size===0){listeners.delete(name);}}}"
         "function emit(name,detail){var set=listeners.get(name);if(set){Array.from(set).forEach(function(callback){callback(detail);});}window.dispatchEvent(new CustomEvent('zero-native:'+name,{detail:detail}));}"
@@ -290,12 +309,15 @@ static const char *zero_native_bridge_script(void) {
         "showMessage:function(options){return invoke('zero-native.dialog.showMessage',options||{});}"
         "});"
         "function zoomPayload(options){options=options||{};validateOverlaySelector(options);return {label:options.label,windowId:options.windowId,zoom:ensureNumber(options.zoom,'zoom')};}"
+        "function layerPayload(options){options=options||{};validateOverlaySelector(options);return {label:options.label,windowId:options.windowId,layer:ensureNumber(options.layer,'layer')};}"
         "var webviews=Object.freeze({"
-        "create:function(options){return invoke('zero-native.overlay.create',createPayload(options)).then(webviewHandle);},"
-        "setFrame:function(options){return invoke('zero-native.overlay.setFrame',framePayload(options));},"
-        "navigate:function(options){return invoke('zero-native.overlay.navigate',navigatePayload(options));},"
-        "setZoom:function(options){return invoke('zero-native.overlay.setZoom',zoomPayload(options));},"
-        "close:function(options){return invoke('zero-native.overlay.close',closePayload(options));}"
+        "create:function(options){return invoke('zero-native.webview.create',createPayload(options)).then(webviewHandle);},"
+        "list:function(){return invoke('zero-native.webview.list',{});},"
+        "setFrame:function(options){return invoke('zero-native.webview.setFrame',framePayload(options));},"
+        "navigate:function(options){return invoke('zero-native.webview.navigate',navigatePayload(options));},"
+        "setZoom:function(options){return invoke('zero-native.webview.setZoom',zoomPayload(options));},"
+        "setLayer:function(options){return invoke('zero-native.webview.setLayer',layerPayload(options));},"
+        "close:function(options){return invoke('zero-native.webview.close',closePayload(options));}"
         "});"
         "Object.defineProperty(window,'zero',{value:Object.freeze({invoke:invoke,on:on,off:off,windows:windows,dialogs:dialogs,webviews:webviews,_complete:complete,_emit:emit}),configurable:false});"
         "})();";
@@ -847,6 +869,11 @@ void zero_native_gtk_bridge_respond_window(zero_native_gtk_host_t *host, uint64_
         memcpy(script + prefix_len + response_len, ");", suffix_len);
         script[script_len] = '\0';
         webkit_web_view_evaluate_javascript(win->web_view, script, -1, NULL, NULL, NULL, NULL, NULL);
+        for (int i = 0; i < win->overlay_count; i++) {
+            if (win->overlays[i].web_view) {
+                webkit_web_view_evaluate_javascript(win->overlays[i].web_view, script, -1, NULL, NULL, NULL, NULL, NULL);
+            }
+        }
         free(script);
     }
     free(resp);
@@ -912,7 +939,7 @@ int zero_native_gtk_close_window(zero_native_gtk_host_t *host, uint64_t window_i
     return 1;
 }
 
-int zero_native_gtk_create_overlay(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height) {
+int zero_native_gtk_create_overlay(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
     zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
     if (!win || !win->overlay_root || label_len == 0 || url_len == 0 || !zero_native_valid_overlay_frame(x, y, width, height)) return 0;
     if (win->overlay_count >= ZERO_NATIVE_MAX_OVERLAYS) return 0;
@@ -931,6 +958,17 @@ int zero_native_gtk_create_overlay(zero_native_gtk_host_t *host, uint64_t window
     }
 
     WebKitUserContentManager *manager = webkit_user_content_manager_new();
+    if (bridge_enabled) {
+        g_signal_connect(manager, "script-message-received::zeroNativeBridge", G_CALLBACK(on_bridge_message), win);
+        webkit_user_content_manager_register_script_message_handler(manager, "zeroNativeBridge", NULL);
+        WebKitUserScript *script = webkit_user_script_new(
+            zero_native_bridge_script(),
+            WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+            WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,
+            NULL, NULL);
+        webkit_user_content_manager_add_script(manager, script);
+        webkit_user_script_unref(script);
+    }
     WebKitWebView *web_view = WEBKIT_WEB_VIEW(
         g_object_new(WEBKIT_TYPE_WEB_VIEW,
             "user-content-manager", manager,
@@ -950,8 +988,16 @@ int zero_native_gtk_create_overlay(zero_native_gtk_host_t *host, uint64_t window
     overlay->y = y;
     overlay->width = width;
     overlay->height = height;
+    overlay->layer = layer;
+    overlay->transparent = transparent != 0;
+    overlay->bridge_enabled = bridge_enabled != 0;
     zero_native_apply_overlay_frame(overlay);
     gtk_overlay_add_overlay(GTK_OVERLAY(win->overlay_root), GTK_WIDGET(web_view));
+    if (transparent) {
+        GdkRGBA transparent_color = {0, 0, 0, 0};
+        webkit_web_view_set_background_color(web_view, &transparent_color);
+    }
+    zero_native_reorder_overlays(win);
     g_signal_connect(web_view, "decide-policy", G_CALLBACK(on_overlay_decide_policy), win);
     webkit_web_view_load_uri(web_view, url_copy);
     free(url_copy);
@@ -961,6 +1007,16 @@ int zero_native_gtk_create_overlay(zero_native_gtk_host_t *host, uint64_t window
 int zero_native_gtk_set_overlay_frame(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height) {
     zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
     char *label_copy = label_len > 0 ? zero_native_strndup(label, label_len) : NULL;
+    if (label_copy && strcmp(label_copy, "main") == 0 && win && win->web_view && zero_native_valid_overlay_frame(x, y, width, height)) {
+        GtkWidget *widget = GTK_WIDGET(win->web_view);
+        gtk_widget_set_halign(widget, GTK_ALIGN_START);
+        gtk_widget_set_valign(widget, GTK_ALIGN_START);
+        gtk_widget_set_margin_start(widget, zero_native_overlay_coord(x));
+        gtk_widget_set_margin_top(widget, zero_native_overlay_coord(y));
+        gtk_widget_set_size_request(widget, zero_native_overlay_extent(width), zero_native_overlay_extent(height));
+        free(label_copy);
+        return 1;
+    }
     zero_native_gtk_overlay_t *overlay = zero_native_find_overlay(win, label_copy);
     free(label_copy);
     if (!overlay || !zero_native_valid_overlay_frame(x, y, width, height)) return 0;
@@ -995,6 +1051,22 @@ int zero_native_gtk_set_overlay_zoom(zero_native_gtk_host_t *host, uint64_t wind
     free(label_copy);
     if (!overlay || !overlay->web_view || zoom < 0.25 || zoom > 5.0) return 0;
     webkit_web_view_set_zoom_level(overlay->web_view, zoom);
+    return 1;
+}
+
+int zero_native_gtk_set_overlay_layer(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int layer) {
+    zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
+    char *label_copy = label_len > 0 ? zero_native_strndup(label, label_len) : NULL;
+    if (label_copy && strcmp(label_copy, "main") == 0 && win && win->web_view) {
+        (void)layer;
+        free(label_copy);
+        return 1;
+    }
+    zero_native_gtk_overlay_t *overlay = zero_native_find_overlay(win, label_copy);
+    free(label_copy);
+    if (!overlay || !overlay->web_view) return 0;
+    overlay->layer = layer;
+    zero_native_reorder_overlays(win);
     return 1;
 }
 

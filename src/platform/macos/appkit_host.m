@@ -72,10 +72,11 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (void)closeWindowWithId:(uint64_t)windowId;
 - (WKWebView *)webViewForWindowId:(uint64_t)windowId;
 - (ZeroNativeAssetSchemeHandler *)assetHandlerForWindowId:(uint64_t)windowId;
-- (BOOL)createOverlayInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height;
+- (BOOL)createOverlayInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled;
 - (BOOL)setOverlayFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height;
 - (BOOL)navigateOverlayInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url;
 - (BOOL)setOverlayZoomInWindow:(uint64_t)windowId label:(NSString *)label zoom:(double)zoom;
+- (BOOL)setOverlayLayerInWindow:(uint64_t)windowId label:(NSString *)label layer:(NSInteger)layer;
 - (BOOL)closeOverlayInWindow:(uint64_t)windowId label:(NSString *)label;
 - (void)closeOverlaysInWindow:(uint64_t)windowId;
 - (void)configureApplication;
@@ -279,13 +280,16 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
         [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
     }
-    WKWebView *webView = [[WKWebView alloc] initWithFrame:rect configuration:configuration];
+    NSView *container = [[NSView alloc] initWithFrame:rect];
+    container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    WKWebView *webView = [[WKWebView alloc] initWithFrame:container.bounds configuration:configuration];
     if ([webView respondsToSelector:NSSelectorFromString(@"setInspectable:")]) {
         [webView setValue:@YES forKey:@"inspectable"];
     }
     webView.navigationDelegate = self;
     webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    window.contentView = webView;
+    [container addSubview:webView positioned:NSWindowAbove relativeTo:nil];
+    window.contentView = container;
 
     ZeroNativeWindowDelegate *delegate = [[ZeroNativeWindowDelegate alloc] init];
     delegate.host = self;
@@ -351,7 +355,7 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     return NSMakeRect(x, nativeY, width, height);
 }
 
-- (BOOL)createOverlayInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height {
+- (BOOL)createOverlayInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled {
     if (label.length == 0 || url.length == 0 || width <= 0 || height <= 0 || x < 0 || y < 0) return NO;
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
     if (!window || !window.contentView) return NO;
@@ -365,11 +369,26 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     if (existing) return NO;
 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+    if (bridgeEnabled) {
+        WKUserContentController *controller = [[WKUserContentController alloc] init];
+        ZeroNativeBridgeScriptHandler *handler = [[ZeroNativeBridgeScriptHandler alloc] init];
+        handler.host = self;
+        handler.windowId = windowId;
+        [controller addScriptMessageHandler:handler name:@"zeroNativeBridge"];
+        [controller addUserScript:[[WKUserScript alloc] initWithSource:ZeroNativeAppKitBridgeScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
+        configuration.userContentController = controller;
+    }
     if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
         [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
     }
 
     WKWebView *overlay = [[WKWebView alloc] initWithFrame:[self overlayFrameForWindow:window x:x y:y width:width height:height] configuration:configuration];
+    overlay.wantsLayer = YES;
+    overlay.layer.zPosition = layer;
+    if (transparent) {
+        overlay.layer.backgroundColor = NSColor.clearColor.CGColor;
+        [overlay setValue:@NO forKey:@"drawsBackground"];
+    }
     if ([overlay respondsToSelector:NSSelectorFromString(@"setInspectable:")]) {
         [overlay setValue:@YES forKey:@"inspectable"];
     }
@@ -385,6 +404,14 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
 - (BOOL)setOverlayFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height {
     if (label.length == 0 || width <= 0 || height <= 0 || x < 0 || y < 0) return NO;
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
+    if ([label isEqualToString:@"main"]) {
+        WKWebView *webView = [self webViewForWindowId:windowId];
+        if (!window || !webView) return NO;
+        webView.autoresizingMask = NSViewNotSizable;
+        webView.frame = [self overlayFrameForWindow:window x:x y:y width:width height:height];
+        [self scheduleBridgeFrames];
+        return YES;
+    }
     WKWebView *overlay = self.overlayWebViews[[self overlayKeyForWindow:windowId label:label]];
     if (!window || !overlay) return NO;
     overlay.frame = [self overlayFrameForWindow:window x:x y:y width:width height:height];
@@ -408,6 +435,22 @@ static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url)
     WKWebView *overlay = self.overlayWebViews[[self overlayKeyForWindow:windowId label:label]];
     if (!overlay) return NO;
     overlay.pageZoom = zoom;
+    return YES;
+}
+
+- (BOOL)setOverlayLayerInWindow:(uint64_t)windowId label:(NSString *)label layer:(NSInteger)layer {
+    if (label.length == 0) return NO;
+    if ([label isEqualToString:@"main"]) {
+        WKWebView *webView = [self webViewForWindowId:windowId];
+        if (!webView) return NO;
+        webView.wantsLayer = YES;
+        webView.layer.zPosition = layer;
+        return YES;
+    }
+    WKWebView *overlay = self.overlayWebViews[[self overlayKeyForWindow:windowId label:label]];
+    if (!overlay) return NO;
+    overlay.wantsLayer = YES;
+    overlay.layer.zPosition = layer;
     return YES;
 }
 
@@ -481,10 +524,10 @@ static NSString *ZeroNativeAppKitBridgeScript(void) {
         "function ensureNumber(value,name){if(typeof value!=='number'||!isFinite(value)){throw new TypeError(name+' must be a finite number');}return value;}"
         "function validateOverlaySelector(options){if(options.label!=null){ensureString(options.label,'label');}if(options.windowId!=null&&(typeof options.windowId!=='number'||!isFinite(options.windowId)||options.windowId<0||Math.floor(options.windowId)!==options.windowId)){throw new TypeError('windowId must be a non-negative integer');}}"
         "function framePayload(options){options=options||{};validateOverlaySelector(options);var frame=options.frame||options;return {label:options.label,windowId:options.windowId,url:options.url,frame:{x:frame.x==null?0:ensureNumber(frame.x,'frame.x'),y:frame.y==null?0:ensureNumber(frame.y,'frame.y'),width:ensureNumber(frame.width,'frame.width'),height:ensureNumber(frame.height,'frame.height')}};}"
-        "function createPayload(options){options=options||{};ensureString(options.url,'url');return framePayload(options);}"
+        "function createPayload(options){options=options||{};ensureString(options.url,'url');var payload=framePayload(options);if(options.layer!=null){payload.layer=ensureNumber(options.layer,'layer');}if(options.transparent!=null){payload.transparent=!!options.transparent;}if(options.bridge!=null){payload.bridge=!!options.bridge;}return payload;}"
         "function navigatePayload(options){options=options||{};validateOverlaySelector(options);ensureString(options.url,'url');return {label:options.label,windowId:options.windowId,url:options.url};}"
         "function closePayload(options){options=options||{};validateOverlaySelector(options);return {label:options.label,windowId:options.windowId};}"
-        "function webviewHandle(info){return Object.freeze({label:info.label,windowId:info.windowId,setFrame:function(frame){return webviews.setFrame({label:info.label,windowId:info.windowId,frame:frame});},navigate:function(url){return webviews.navigate({label:info.label,windowId:info.windowId,url:url});},setZoom:function(zoom){return webviews.setZoom({label:info.label,windowId:info.windowId,zoom:zoom});},close:function(){return webviews.close({label:info.label,windowId:info.windowId});}});}"
+        "function webviewHandle(info){return Object.freeze(Object.assign({},info,{setFrame:function(frame){return webviews.setFrame({label:info.label,windowId:info.windowId,frame:frame});},navigate:function(url){return webviews.navigate({label:info.label,windowId:info.windowId,url:url});},setZoom:function(zoom){return webviews.setZoom({label:info.label,windowId:info.windowId,zoom:zoom});},setLayer:function(layer){return webviews.setLayer({label:info.label,windowId:info.windowId,layer:layer});},close:function(){return webviews.close({label:info.label,windowId:info.windowId});}}));}"
         "function on(name,callback){if(typeof callback!=='function'){throw new TypeError('callback must be a function');}var set=listeners.get(name);if(!set){set=new Set();listeners.set(name,set);}set.add(callback);return function(){off(name,callback);};}"
         "function off(name,callback){var set=listeners.get(name);if(set){set.delete(callback);if(set.size===0){listeners.delete(name);}}}"
         "function emit(name,detail){var set=listeners.get(name);if(set){Array.from(set).forEach(function(callback){callback(detail);});}window.dispatchEvent(new CustomEvent('zero-native:'+name,{detail:detail}));}"
@@ -500,12 +543,15 @@ static NSString *ZeroNativeAppKitBridgeScript(void) {
         "showMessage:function(options){return invoke('zero-native.dialog.showMessage',options||{});}"
         "});"
         "function zoomPayload(options){options=options||{};validateOverlaySelector(options);return {label:options.label,windowId:options.windowId,zoom:ensureNumber(options.zoom,'zoom')};}"
+        "function layerPayload(options){options=options||{};validateOverlaySelector(options);return {label:options.label,windowId:options.windowId,layer:ensureNumber(options.layer,'layer')};}"
         "var webviews=Object.freeze({"
-        "create:function(options){return invoke('zero-native.overlay.create',createPayload(options)).then(webviewHandle);},"
-        "setFrame:function(options){return invoke('zero-native.overlay.setFrame',framePayload(options));},"
-        "navigate:function(options){return invoke('zero-native.overlay.navigate',navigatePayload(options));},"
-        "setZoom:function(options){return invoke('zero-native.overlay.setZoom',zoomPayload(options));},"
-        "close:function(options){return invoke('zero-native.overlay.close',closePayload(options));}"
+        "create:function(options){return invoke('zero-native.webview.create',createPayload(options)).then(webviewHandle);},"
+        "list:function(){return invoke('zero-native.webview.list',{});},"
+        "setFrame:function(options){return invoke('zero-native.webview.setFrame',framePayload(options));},"
+        "navigate:function(options){return invoke('zero-native.webview.navigate',navigatePayload(options));},"
+        "setZoom:function(options){return invoke('zero-native.webview.setZoom',zoomPayload(options));},"
+        "setLayer:function(options){return invoke('zero-native.webview.setLayer',layerPayload(options));},"
+        "close:function(options){return invoke('zero-native.webview.close',closePayload(options));}"
         "});"
         "Object.defineProperty(window,'zero',{value:Object.freeze({invoke:invoke,on:on,off:off,windows:windows,dialogs:dialogs,webviews:webviews,_complete:complete,_emit:emit}),configurable:false});"
         "})();";
@@ -864,6 +910,11 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
     WKWebView *webView = [self webViewForWindowId:windowId];
     NSString *script = [NSString stringWithFormat:@"window.zero&&window.zero._complete(%@);", response.length > 0 ? response : @"{}"];
     [webView evaluateJavaScript:script completionHandler:nil];
+    NSString *prefix = [NSString stringWithFormat:@"%llu:", windowId];
+    for (NSString *key in self.overlayWebViews) {
+        if (![key hasPrefix:prefix]) continue;
+        [self.overlayWebViews[key] evaluateJavaScript:script completionHandler:nil];
+    }
     [self scheduleBridgeFrames];
 }
 
@@ -1045,11 +1096,11 @@ int zero_native_appkit_close_window(zero_native_appkit_host_t *host, uint64_t wi
     return 1;
 }
 
-int zero_native_appkit_create_overlay(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height) {
+int zero_native_appkit_create_overlay(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     NSString *urlString = url ? [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding] : @"";
-    return [object createOverlayInWindow:window_id label:labelString ?: @"" url:urlString ?: @"" x:x y:y width:width height:height] ? 1 : 0;
+    return [object createOverlayInWindow:window_id label:labelString ?: @"" url:urlString ?: @"" x:x y:y width:width height:height layer:layer transparent:transparent != 0 bridgeEnabled:bridge_enabled != 0] ? 1 : 0;
 }
 
 int zero_native_appkit_set_overlay_frame(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height) {
@@ -1069,6 +1120,12 @@ int zero_native_appkit_set_overlay_zoom(zero_native_appkit_host_t *host, uint64_
     ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     return [object setOverlayZoomInWindow:window_id label:labelString ?: @"" zoom:zoom] ? 1 : 0;
+}
+
+int zero_native_appkit_set_overlay_layer(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int layer) {
+    ZeroNativeAppKitHost *object = (__bridge ZeroNativeAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object setOverlayLayerInWindow:window_id label:labelString ?: @"" layer:layer] ? 1 : 0;
 }
 
 int zero_native_appkit_close_overlay(zero_native_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len) {

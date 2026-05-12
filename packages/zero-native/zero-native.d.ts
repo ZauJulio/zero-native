@@ -53,10 +53,19 @@ export interface ZeroNativeRect {
 export interface ZeroNativeWebViewInfo {
   label: string;
   windowId: number;
+  url: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  layer: number;
+  transparent: boolean;
+  bridge: boolean;
+  open: boolean;
 }
 
 export interface ZeroNativeCreateWebViewOptions {
-  /** Stable label for this overlay WebView. Defaults to "overlay". Unique per parent window. */
+  /** Stable label for this WebView. Defaults to "webview". Unique per native window. */
   label?: string;
   /** Parent native window id. Defaults to the caller and must match the window that calls the command when provided. */
   windowId?: number;
@@ -64,6 +73,12 @@ export interface ZeroNativeCreateWebViewOptions {
   url: string;
   /** Logical content coordinates relative to the parent window. */
   frame: ZeroNativeRect;
+  /** Native z-order within the parent window. Higher layers appear above lower layers. */
+  layer?: number;
+  /** Best-effort transparent WebView background support for chrome/menu surfaces. */
+  transparent?: boolean;
+  /** Inject `window.zero` into this WebView when it is trusted app chrome. Defaults to false. */
+  bridge?: boolean;
 }
 
 export interface ZeroNativeSetWebViewFrameOptions {
@@ -88,6 +103,13 @@ export interface ZeroNativeSetWebViewZoomOptions {
   zoom: number;
 }
 
+export interface ZeroNativeSetWebViewLayerOptions {
+  label?: string;
+  /** Defaults to the caller and must match the window that calls the command when provided. */
+  windowId?: number;
+  layer: number;
+}
+
 export interface ZeroNativeCloseWebViewOptions {
   label?: string;
   /** Defaults to the caller and must match the window that calls the command when provided. */
@@ -98,6 +120,7 @@ export interface ZeroNativeWebViewHandle extends ZeroNativeWebViewInfo {
   setFrame(frame: ZeroNativeRect): Promise<ZeroNativeWebViewInfo>;
   navigate(url: string): Promise<ZeroNativeWebViewInfo>;
   setZoom(zoom: number): Promise<ZeroNativeWebViewInfo>;
+  setLayer(layer: number): Promise<ZeroNativeWebViewInfo>;
   close(): Promise<ZeroNativeWebViewInfo>;
 }
 
@@ -134,12 +157,14 @@ export interface ZeroNativeApi {
     focus(value: number | string): Promise<ZeroNativeWindowInfo>;
     close(value: number | string): Promise<ZeroNativeWindowInfo>;
   };
-  /** Native overlay WebViews are isolated by default and do not receive `window.zero`. */
+  /** Manage the named native WebViews layered inside the calling native window. */
   webviews: {
     create(options: ZeroNativeCreateWebViewOptions): Promise<ZeroNativeWebViewHandle>;
+    list(): Promise<ZeroNativeWebViewInfo[]>;
     setFrame(options: ZeroNativeSetWebViewFrameOptions): Promise<ZeroNativeWebViewInfo>;
     navigate(options: ZeroNativeNavigateWebViewOptions): Promise<ZeroNativeWebViewInfo>;
     setZoom(options: ZeroNativeSetWebViewZoomOptions): Promise<ZeroNativeWebViewInfo>;
+    setLayer(options: ZeroNativeSetWebViewLayerOptions): Promise<ZeroNativeWebViewInfo>;
     close(options?: ZeroNativeCloseWebViewOptions): Promise<ZeroNativeWebViewInfo>;
   };
   dialogs: {

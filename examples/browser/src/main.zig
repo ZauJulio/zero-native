@@ -8,11 +8,13 @@ const app_permissions = [_][]const u8{zero_native.security.permission_window};
 const bridge_origins = [_][]const u8{"zero://app"};
 const window_permission = [_][]const u8{zero_native.security.permission_window};
 const builtin_policies = [_]zero_native.BridgeCommandPolicy{
-    .{ .name = "zero-native.overlay.create", .permissions = &window_permission, .origins = &bridge_origins },
-    .{ .name = "zero-native.overlay.setFrame", .permissions = &window_permission, .origins = &bridge_origins },
-    .{ .name = "zero-native.overlay.navigate", .permissions = &window_permission, .origins = &bridge_origins },
-    .{ .name = "zero-native.overlay.setZoom", .permissions = &window_permission, .origins = &bridge_origins },
-    .{ .name = "zero-native.overlay.close", .permissions = &window_permission, .origins = &bridge_origins },
+    .{ .name = "zero-native.webview.create", .permissions = &window_permission, .origins = &bridge_origins },
+    .{ .name = "zero-native.webview.list", .permissions = &window_permission, .origins = &bridge_origins },
+    .{ .name = "zero-native.webview.setFrame", .permissions = &window_permission, .origins = &bridge_origins },
+    .{ .name = "zero-native.webview.navigate", .permissions = &window_permission, .origins = &bridge_origins },
+    .{ .name = "zero-native.webview.setZoom", .permissions = &window_permission, .origins = &bridge_origins },
+    .{ .name = "zero-native.webview.setLayer", .permissions = &window_permission, .origins = &bridge_origins },
+    .{ .name = "zero-native.webview.close", .permissions = &window_permission, .origins = &bridge_origins },
 };
 
 const BrowserApp = struct {

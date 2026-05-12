@@ -105,10 +105,10 @@ const builtin_policies = [_]zero_native.BridgeCommandPolicy{
     .{ .name = "zero-native.window.create", .permissions = &window_permission, .origins = &example_origins },
     .{ .name = "zero-native.window.focus", .permissions = &window_permission, .origins = &example_origins },
     .{ .name = "zero-native.window.close", .permissions = &window_permission, .origins = &example_origins },
-    .{ .name = "zero-native.overlay.create", .permissions = &window_permission, .origins = &example_origins },
-    .{ .name = "zero-native.overlay.setFrame", .permissions = &window_permission, .origins = &example_origins },
-    .{ .name = "zero-native.overlay.navigate", .permissions = &window_permission, .origins = &example_origins },
-    .{ .name = "zero-native.overlay.close", .permissions = &window_permission, .origins = &example_origins },
+    .{ .name = "zero-native.webview.create", .permissions = &window_permission, .origins = &example_origins },
+    .{ .name = "zero-native.webview.setFrame", .permissions = &window_permission, .origins = &example_origins },
+    .{ .name = "zero-native.webview.navigate", .permissions = &window_permission, .origins = &example_origins },
+    .{ .name = "zero-native.webview.close", .permissions = &window_permission, .origins = &example_origins },
 };
 
 const WebViewApp = struct {

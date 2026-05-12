@@ -96,7 +96,7 @@ pub const Runtime = struct {
     surface: platform.Surface,
     windows: [platform.max_windows]RuntimeWindow = undefined,
     window_count: usize = 0,
-    overlays: [platform.max_overlays]RuntimeOverlay = undefined,
+    overlays: [platform.max_webviews]RuntimeWebView = undefined,
     overlay_count: usize = 0,
     next_window_id: platform.WindowId = 2,
     invalidated: bool = true,
@@ -539,7 +539,7 @@ pub const Runtime = struct {
     fn handleBuiltinBridgeMessage(self: *Runtime, message: platform.BridgeMessage) anyerror!bool {
         const request = bridge.parseRequest(message.bytes) catch return false;
         const is_window = std.mem.startsWith(u8, request.command, "zero-native.window.");
-        const is_overlay = std.mem.startsWith(u8, request.command, "zero-native.overlay.");
+        const is_overlay = std.mem.startsWith(u8, request.command, "zero-native.webview.");
         const is_dialog = std.mem.startsWith(u8, request.command, "zero-native.dialog.");
         if (!is_window and !is_overlay and !is_dialog) return false;
 
@@ -560,7 +560,7 @@ pub const Runtime = struct {
         const result = if (is_window)
             self.dispatchWindowBridgeCommand(request, &result_buffer, &response_buffer)
         else if (is_overlay)
-            self.dispatchOverlayBridgeCommand(request, message.window_id, &result_buffer, &response_buffer)
+            self.dispatchWebViewBridgeCommand(request, message.window_id, &result_buffer, &response_buffer)
         else
             self.dispatchDialogBridgeCommand(request, &result_buffer, &response_buffer);
 
@@ -600,19 +600,23 @@ pub const Runtime = struct {
         return bridge.writeSuccessResponse(response_buffer, request.id, result);
     }
 
-    fn dispatchOverlayBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
-        const result = if (std.mem.eql(u8, request.command, "zero-native.overlay.create"))
-            self.createOverlayFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
-        else if (std.mem.eql(u8, request.command, "zero-native.overlay.setFrame"))
-            self.setOverlayFrameFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
-        else if (std.mem.eql(u8, request.command, "zero-native.overlay.navigate"))
-            self.navigateOverlayFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
-        else if (std.mem.eql(u8, request.command, "zero-native.overlay.setZoom"))
-            self.setOverlayZoomFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
-        else if (std.mem.eql(u8, request.command, "zero-native.overlay.close"))
-            self.closeOverlayFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
+    fn dispatchWebViewBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
+        const result = if (std.mem.eql(u8, request.command, "zero-native.webview.create"))
+            self.createWebViewFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.webview.list"))
+            self.writeWebViewListJson(source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.webview.setFrame"))
+            self.setWebViewFrameFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.webview.navigate"))
+            self.navigateWebViewFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.webview.setZoom"))
+            self.setWebViewZoomFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.webview.setLayer"))
+            self.setWebViewLayerFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.webview.close"))
+            self.closeWebViewFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
         else
-            return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown overlay command");
+            return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown WebView command");
         return bridge.writeSuccessResponse(response_buffer, request.id, result);
     }
 
@@ -737,84 +741,115 @@ pub const Runtime = struct {
         return writeWindowJson(info, output);
     }
 
-    fn createOverlayFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
-        var scratch: [platform.max_overlay_label_bytes + platform.max_overlay_url_bytes]u8 = undefined;
+    fn createWebViewFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
+        var scratch: [platform.max_webview_label_bytes + platform.max_webview_url_bytes]u8 = undefined;
         var storage = json.StringStorage.init(&scratch);
-        const label = jsonStringField(payload, "label", &storage) orelse "overlay";
+        const label = jsonStringField(payload, "label", &storage) orelse "webview";
         const url = jsonStringField(payload, "url", &storage) orelse return error.MissingOverlayUrl;
         const window_id = try overlayWindowIdFromJson(payload, source_window_id);
         const overlay_frame = try overlayFrameFromJson(payload);
+        const layer = webViewLayerFromJson(payload);
+        const transparent = jsonBoolField(payload, "transparent") orelse false;
+        const bridge_enabled = jsonBoolField(payload, "bridge") orelse false;
         try self.validateOverlayParent(window_id);
         try validateOverlayLabel(label);
         try self.validateOverlayUrl(url);
         if (self.findOverlayIndex(window_id, label) != null) return error.DuplicateOverlayLabel;
-        if (self.overlay_count >= platform.max_overlays) return error.OverlayLimitReached;
-        try self.options.platform.services.createOverlay(.{
+        if (self.overlay_count >= platform.max_webviews) return error.OverlayLimitReached;
+        try self.options.platform.services.createWebView(.{
             .window_id = window_id,
             .label = label,
             .url = url,
             .frame = overlay_frame,
+            .layer = layer,
+            .transparent = transparent,
+            .bridge_enabled = bridge_enabled,
         });
-        errdefer self.options.platform.services.closeOverlay(window_id, label) catch {};
-        try self.reserveOverlay(window_id, label, url, overlay_frame);
-        return writeOverlayOkJson(label, window_id, output);
+        errdefer self.options.platform.services.closeWebView(window_id, label) catch {};
+        try self.reserveWebView(window_id, label, url, overlay_frame, layer, transparent, bridge_enabled);
+        return writeWebViewJson(self.overlays[self.overlay_count - 1], output);
     }
 
-    fn setOverlayFrameFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
-        var scratch: [platform.max_overlay_label_bytes]u8 = undefined;
+    fn setWebViewFrameFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
+        var scratch: [platform.max_webview_label_bytes]u8 = undefined;
         var storage = json.StringStorage.init(&scratch);
-        const label = jsonStringField(payload, "label", &storage) orelse "overlay";
+        const label = jsonStringField(payload, "label", &storage) orelse "webview";
         const window_id = try overlayWindowIdFromJson(payload, source_window_id);
         const overlay_frame = try overlayFrameFromJson(payload);
         try self.validateOverlayParent(window_id);
         try validateOverlayLabel(label);
+        if (isMainWebViewLabel(label)) {
+            try self.options.platform.services.setWebViewFrame(window_id, label, overlay_frame);
+            return writeImplicitMainWebViewJson(window_id, overlay_frame, output);
+        }
         const overlay_index = self.findOverlayIndex(window_id, label) orelse return error.OverlayNotFound;
-        try self.options.platform.services.setOverlayFrame(window_id, label, overlay_frame);
+        try self.options.platform.services.setWebViewFrame(window_id, label, overlay_frame);
         self.overlays[overlay_index].frame = overlay_frame;
-        return writeOverlayOkJson(label, window_id, output);
+        return writeWebViewJson(self.overlays[overlay_index], output);
     }
 
-    fn navigateOverlayFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
-        var scratch: [platform.max_overlay_label_bytes + platform.max_overlay_url_bytes]u8 = undefined;
+    fn navigateWebViewFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
+        var scratch: [platform.max_webview_label_bytes + platform.max_webview_url_bytes]u8 = undefined;
         var storage = json.StringStorage.init(&scratch);
-        const label = jsonStringField(payload, "label", &storage) orelse "overlay";
+        const label = jsonStringField(payload, "label", &storage) orelse "webview";
         const url = jsonStringField(payload, "url", &storage) orelse return error.MissingOverlayUrl;
         const window_id = try overlayWindowIdFromJson(payload, source_window_id);
         try self.validateOverlayParent(window_id);
         try validateOverlayLabel(label);
         try self.validateOverlayUrl(url);
         const overlay_index = self.findOverlayIndex(window_id, label) orelse return error.OverlayNotFound;
-        try self.options.platform.services.navigateOverlay(window_id, label, url);
+        try self.options.platform.services.navigateWebView(window_id, label, url);
         self.overlays[overlay_index].url = try copyInto(&self.overlays[overlay_index].url_storage, url);
-        return writeOverlayOkJson(label, window_id, output);
+        return writeWebViewJson(self.overlays[overlay_index], output);
     }
 
-    fn setOverlayZoomFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
-        var scratch: [platform.max_overlay_label_bytes]u8 = undefined;
+    fn setWebViewZoomFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
+        var scratch: [platform.max_webview_label_bytes]u8 = undefined;
         var storage = json.StringStorage.init(&scratch);
-        const label = jsonStringField(payload, "label", &storage) orelse "overlay";
+        const label = jsonStringField(payload, "label", &storage) orelse "webview";
         const zoom_f32 = jsonNumberField(payload, "zoom") orelse return error.InvalidOverlayOptions;
         const zoom: f64 = @floatCast(zoom_f32);
         if (zoom < 0.25 or zoom > 5.0) return error.InvalidOverlayOptions;
         const window_id = try overlayWindowIdFromJson(payload, source_window_id);
         try self.validateOverlayParent(window_id);
         try validateOverlayLabel(label);
-        _ = self.findOverlayIndex(window_id, label) orelse return error.OverlayNotFound;
-        try self.options.platform.services.setOverlayZoom(window_id, label, zoom);
-        return writeOverlayOkJson(label, window_id, output);
+        if (isMainWebViewLabel(label)) {
+            const layer = webViewLayerFromJson(payload);
+            try self.options.platform.services.setWebViewLayer(window_id, label, layer);
+            return writeImplicitMainWebViewJson(window_id, geometry.RectF.init(0, 0, 0, 0), output);
+        }
+        const overlay_index = self.findOverlayIndex(window_id, label) orelse return error.OverlayNotFound;
+        try self.options.platform.services.setWebViewZoom(window_id, label, zoom);
+        return writeWebViewJson(self.overlays[overlay_index], output);
     }
 
-    fn closeOverlayFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
-        var scratch: [platform.max_overlay_label_bytes]u8 = undefined;
+    fn setWebViewLayerFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
+        var scratch: [platform.max_webview_label_bytes]u8 = undefined;
         var storage = json.StringStorage.init(&scratch);
-        const label = jsonStringField(payload, "label", &storage) orelse "overlay";
+        const label = jsonStringField(payload, "label", &storage) orelse "webview";
+        const window_id = try overlayWindowIdFromJson(payload, source_window_id);
+        try self.validateOverlayParent(window_id);
+        try validateOverlayLabel(label);
+        if (isMainWebViewLabel(label)) return error.InvalidOverlayOptions;
+        const overlay_index = self.findOverlayIndex(window_id, label) orelse return error.OverlayNotFound;
+        const layer = webViewLayerFromJson(payload);
+        try self.options.platform.services.setWebViewLayer(window_id, label, layer);
+        self.overlays[overlay_index].layer = layer;
+        return writeWebViewJson(self.overlays[overlay_index], output);
+    }
+
+    fn closeWebViewFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
+        var scratch: [platform.max_webview_label_bytes]u8 = undefined;
+        var storage = json.StringStorage.init(&scratch);
+        const label = jsonStringField(payload, "label", &storage) orelse "webview";
         const window_id = try overlayWindowIdFromJson(payload, source_window_id);
         try self.validateOverlayParent(window_id);
         try validateOverlayLabel(label);
         const overlay_index = self.findOverlayIndex(window_id, label) orelse return error.OverlayNotFound;
-        try self.options.platform.services.closeOverlay(window_id, label);
+        const closing = self.overlays[overlay_index];
+        try self.options.platform.services.closeWebView(window_id, label);
         self.removeOverlayAt(overlay_index);
-        return writeOverlayOkJson(label, window_id, output);
+        return writeWebViewJson(closing, output);
     }
 
     fn validateOverlayParent(self: *Runtime, window_id: platform.WindowId) !void {
@@ -824,15 +859,38 @@ pub const Runtime = struct {
 
     fn validateOverlayUrl(self: *Runtime, url: []const u8) !void {
         if (url.len == 0) return error.MissingOverlayUrl;
-        if (url.len > platform.max_overlay_url_bytes) return error.OverlayUrlTooLarge;
+        if (url.len > platform.max_webview_url_bytes) return error.OverlayUrlTooLarge;
         var origin_buffer: [512]u8 = undefined;
         const origin = try overlayUrlOrigin(url, &origin_buffer);
         if (!security.allowsOrigin(self.options.security.navigation.allowed_origins, origin)) return error.NavigationDenied;
     }
 
-    fn reserveOverlay(self: *Runtime, window_id: platform.WindowId, label: []const u8, url: []const u8, overlay_frame: geometry.RectF) !void {
+    fn writeWebViewListJson(self: *Runtime, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
+        try self.validateOverlayParent(source_window_id);
+        var writer = std.Io.Writer.fixed(output);
+        try writer.writeByte('[');
+        try writeImplicitMainWebViewJsonToWriter(source_window_id, geometry.RectF.init(0, 0, 0, 0), &writer);
+        var written: usize = 1;
+        for (self.overlays[0..self.overlay_count]) |webview| {
+            if (webview.window_id != source_window_id or !webview.open) continue;
+            if (written > 0) try writer.writeByte(',');
+            try writeWebViewJsonToWriter(webview, &writer);
+            written += 1;
+        }
+        try writer.writeByte(']');
+        return writer.buffered();
+    }
+
+    fn reserveWebView(self: *Runtime, window_id: platform.WindowId, label: []const u8, url: []const u8, overlay_frame: geometry.RectF, layer: i32, transparent: bool, bridge_enabled: bool) !void {
         const index = self.overlay_count;
-        self.overlays[index] = .{ .window_id = window_id, .frame = overlay_frame, .open = true };
+        self.overlays[index] = .{
+            .window_id = window_id,
+            .frame = overlay_frame,
+            .layer = layer,
+            .transparent = transparent,
+            .bridge_enabled = bridge_enabled,
+            .open = true,
+        };
         self.overlays[index].label = try copyInto(&self.overlays[index].label_storage, label);
         self.overlays[index].url = try copyInto(&self.overlays[index].url_storage, url);
         self.overlay_count += 1;
@@ -850,7 +908,14 @@ pub const Runtime = struct {
         var cursor = index;
         while (cursor + 1 < self.overlay_count) : (cursor += 1) {
             const next = self.overlays[cursor + 1];
-            self.overlays[cursor] = .{ .window_id = next.window_id, .frame = next.frame, .open = next.open };
+            self.overlays[cursor] = .{
+                .window_id = next.window_id,
+                .frame = next.frame,
+                .layer = next.layer,
+                .transparent = next.transparent,
+                .bridge_enabled = next.bridge_enabled,
+                .open = next.open,
+            };
             self.overlays[cursor].label = copyInto(&self.overlays[cursor].label_storage, next.label) catch unreachable;
             self.overlays[cursor].url = copyInto(&self.overlays[cursor].url_storage, next.url) catch unreachable;
         }
@@ -949,14 +1014,17 @@ const RuntimeWindow = struct {
     source_storage: [platform.max_window_source_bytes]u8 = undefined,
 };
 
-const RuntimeOverlay = struct {
+const RuntimeWebView = struct {
     window_id: platform.WindowId = 1,
     label: []const u8 = "",
     url: []const u8 = "",
     frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
+    layer: i32 = 0,
+    transparent: bool = false,
+    bridge_enabled: bool = false,
     open: bool = false,
-    label_storage: [platform.max_overlay_label_bytes]u8 = undefined,
-    url_storage: [platform.max_overlay_url_bytes]u8 = undefined,
+    label_storage: [platform.max_webview_label_bytes]u8 = undefined,
+    url_storage: [platform.max_webview_url_bytes]u8 = undefined,
 };
 
 fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {
@@ -977,6 +1045,46 @@ fn writeOverlayOkJson(label: []const u8, window_id: platform.WindowId, output: [
     try json.writeString(&writer, label);
     try writer.print(",\"windowId\":{d}}}", .{window_id});
     return writer.buffered();
+}
+
+fn writeWebViewJson(webview: RuntimeWebView, output: []u8) ![]const u8 {
+    var writer = std.Io.Writer.fixed(output);
+    try writeWebViewJsonToWriter(webview, &writer);
+    return writer.buffered();
+}
+
+fn writeImplicitMainWebViewJson(window_id: platform.WindowId, frame: geometry.RectF, output: []u8) ![]const u8 {
+    var writer = std.Io.Writer.fixed(output);
+    try writeImplicitMainWebViewJsonToWriter(window_id, frame, &writer);
+    return writer.buffered();
+}
+
+fn writeImplicitMainWebViewJsonToWriter(window_id: platform.WindowId, frame: geometry.RectF, writer: anytype) !void {
+    try writer.writeAll("{\"label\":\"main\",\"windowId\":");
+    try writer.print("{d}", .{window_id});
+    try writer.print(",\"url\":\"\",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":100,\"transparent\":false,\"bridge\":true,\"open\":true}}", .{
+        frame.x,
+        frame.y,
+        frame.width,
+        frame.height,
+    });
+}
+
+fn writeWebViewJsonToWriter(webview: RuntimeWebView, writer: anytype) !void {
+    try writer.writeAll("{\"label\":");
+    try json.writeString(writer, webview.label);
+    try writer.print(",\"windowId\":{d},\"url\":", .{webview.window_id});
+    try json.writeString(writer, webview.url);
+    try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":{d},\"transparent\":{},\"bridge\":{},\"open\":{}}}", .{
+        webview.frame.x,
+        webview.frame.y,
+        webview.frame.width,
+        webview.frame.height,
+        webview.layer,
+        webview.transparent,
+        webview.bridge_enabled,
+        webview.open,
+    });
 }
 
 fn writeWindowJsonToWriter(window: platform.WindowInfo, writer: anytype) !void {
@@ -1011,13 +1119,13 @@ fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
         error.CreateFailed => "Native view creation failed",
         error.MissingOverlayUrl => "WebView URL is missing",
         error.InvalidOverlayWindowId => "windowId must be a non-negative integer",
-        error.CrossWindowOverlayDenied => "Overlay windowId must match the calling window",
+        error.CrossWindowOverlayDenied => "WebView windowId must match the calling window",
         error.InvalidOverlayOptions => "WebView options are invalid",
-        error.OverlayNotFound => "Overlay was not found",
-        error.OverlayLimitReached => "Overlay limit reached",
-        error.DuplicateOverlayLabel => "Overlay label already exists",
-        error.OverlayLabelTooLarge => "Overlay label is too large",
-        error.OverlayUrlTooLarge => "Overlay URL is too large",
+        error.OverlayNotFound => "WebView was not found",
+        error.OverlayLimitReached => "WebView limit reached",
+        error.DuplicateOverlayLabel => "WebView label already exists",
+        error.OverlayLabelTooLarge => "WebView label is too large",
+        error.OverlayUrlTooLarge => "WebView URL is too large",
         error.NavigationDenied => "WebView URL is not allowed by navigation policy",
         error.InvalidWindowOptions => "Window options are invalid",
         error.DuplicateWindowId => "Window id already exists",
@@ -1070,9 +1178,20 @@ fn overlayFrameFromJson(payload: []const u8) !geometry.RectF {
     return frame;
 }
 
+fn webViewLayerFromJson(payload: []const u8) i32 {
+    const layer_value = jsonNumberField(payload, "layer") orelse 0;
+    if (layer_value > 2147483000.0) return 2147483000;
+    if (layer_value < -2147483000.0) return -2147483000;
+    return @as(i32, @intFromFloat(layer_value));
+}
+
+fn isMainWebViewLabel(label: []const u8) bool {
+    return std.mem.eql(u8, label, "main");
+}
+
 fn validateOverlayLabel(label: []const u8) !void {
     if (label.len == 0) return error.InvalidOverlayOptions;
-    if (label.len > platform.max_overlay_label_bytes) return error.OverlayLabelTooLarge;
+    if (label.len > platform.max_webview_label_bytes) return error.OverlayLabelTooLarge;
 }
 
 fn overlayUrlOrigin(url: []const u8, buffer: []u8) ![]const u8 {
@@ -1392,7 +1511,7 @@ test "runtime handles built-in JavaScript overlay bridge commands" {
     try harness.start(app_state.app());
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.com\",\"frame\":{\"x\":10,\"y\":20,\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.webview.create\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.com\",\"frame\":{\"x\":10,\"y\":20,\"width\":300,\"height\":200},\"layer\":2,\"transparent\":true,\"bridge\":false}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1400,30 +1519,47 @@ test "runtime handles built-in JavaScript overlay bridge commands" {
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.overlay_count);
     try std.testing.expectEqualStrings("preview", harness.null_platform.overlays[0].label);
     try std.testing.expectEqualStrings("https://example.com", harness.null_platform.overlays[0].url);
+    try std.testing.expectEqual(@as(i32, 2), harness.null_platform.overlays[0].layer);
+    try std.testing.expect(harness.null_platform.overlays[0].transparent);
+    try std.testing.expect(!harness.null_platform.overlays[0].bridge_enabled);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"2\",\"command\":\"zero-native.overlay.setFrame\",\"payload\":{\"label\":\"preview\",\"frame\":{\"x\":11,\"y\":22,\"width\":333,\"height\":222}}}",
+        .bytes = "{\"id\":\"2\",\"command\":\"zero-native.webview.setFrame\",\"payload\":{\"label\":\"preview\",\"frame\":{\"x\":11,\"y\":22,\"width\":333,\"height\":222}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
     try std.testing.expectEqual(@as(f32, 333), harness.null_platform.overlays[0].frame.width);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"3\",\"command\":\"zero-native.overlay.navigate\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.org\"}}",
+        .bytes = "{\"id\":\"3\",\"command\":\"zero-native.webview.navigate\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.org\"}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
     try std.testing.expectEqualStrings("https://example.org", harness.null_platform.overlays[0].url);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"4\",\"command\":\"zero-native.overlay.setZoom\",\"payload\":{\"label\":\"preview\",\"zoom\":1.25}}",
+        .bytes = "{\"id\":\"4\",\"command\":\"zero-native.webview.setZoom\",\"payload\":{\"label\":\"preview\",\"zoom\":1.25}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
     try std.testing.expectEqual(@as(f64, 1.25), harness.null_platform.overlays[0].zoom);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"5\",\"command\":\"zero-native.overlay.close\",\"payload\":{\"label\":\"preview\"}}",
+        .bytes = "{\"id\":\"5\",\"command\":\"zero-native.webview.setLayer\",\"payload\":{\"label\":\"preview\",\"layer\":10}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expectEqual(@as(i32, 10), harness.null_platform.overlays[0].layer);
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"6\",\"command\":\"zero-native.webview.list\",\"payload\":{}}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"layer\":10") != null);
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"7\",\"command\":\"zero-native.webview.close\",\"payload\":{\"label\":\"preview\"}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1447,7 +1583,7 @@ test "runtime defaults overlay commands to source window" {
     const secondary = try harness.runtime.createWindow(.{ .label = "secondary" });
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"1\",\"command\":\"zero-native.webview.create\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = secondary.id,
     } });
@@ -1458,7 +1594,7 @@ test "runtime defaults overlay commands to source window" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"windowId\":2") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"2\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"windowId\":2,\"label\":\"cross-window\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"2\",\"command\":\"zero-native.webview.create\",\"payload\":{\"windowId\":2,\"label\":\"cross-window\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1482,7 +1618,7 @@ test "runtime validates overlay bridge commands" {
     try harness.start(app_state.app());
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"missing-url\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"label\":\"preview\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"missing-url\",\"command\":\"zero-native.webview.create\",\"payload\":{\"label\":\"preview\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1490,7 +1626,7 @@ test "runtime validates overlay bridge commands" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"invalid-frame\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.com\",\"frame\":{\"width\":0,\"height\":200}}}",
+        .bytes = "{\"id\":\"invalid-frame\",\"command\":\"zero-native.webview.create\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.com\",\"frame\":{\"width\":0,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1498,22 +1634,22 @@ test "runtime validates overlay bridge commands" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"ok\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"ok\",\"command\":\"zero-native.webview.create\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"duplicate\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.org\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"duplicate\",\"command\":\"zero-native.webview.create\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.org\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
-    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "Overlay label already exists") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "WebView label already exists") != null);
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"missing-window\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"windowId\":99,\"label\":\"other\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"missing-window\",\"command\":\"zero-native.webview.create\",\"payload\":{\"windowId\":99,\"label\":\"other\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1521,7 +1657,7 @@ test "runtime validates overlay bridge commands" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"bad-window-id\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"windowId\":\"1\",\"label\":\"bad-window-id\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"bad-window-id\",\"command\":\"zero-native.webview.create\",\"payload\":{\"windowId\":\"1\",\"label\":\"bad-window-id\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1529,37 +1665,37 @@ test "runtime validates overlay bridge commands" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"missing-overlay\",\"command\":\"zero-native.overlay.setFrame\",\"payload\":{\"label\":\"missing\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"missing-overlay\",\"command\":\"zero-native.webview.setFrame\",\"payload\":{\"label\":\"missing\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
-    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "Overlay was not found") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "WebView was not found") != null);
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
 
     var long_label = [_]u8{'a'} ** (platform.max_overlay_label_bytes + 1);
     var long_label_request_buffer: [512]u8 = undefined;
-    const long_label_request = try std.fmt.bufPrint(&long_label_request_buffer, "{{\"id\":\"long-label\",\"command\":\"zero-native.overlay.create\",\"payload\":{{\"label\":\"{s}\",\"url\":\"https://example.com\",\"frame\":{{\"width\":300,\"height\":200}}}}}}", .{&long_label});
+    const long_label_request = try std.fmt.bufPrint(&long_label_request_buffer, "{{\"id\":\"long-label\",\"command\":\"zero-native.webview.create\",\"payload\":{{\"label\":\"{s}\",\"url\":\"https://example.com\",\"frame\":{{\"width\":300,\"height\":200}}}}}}", .{&long_label});
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
         .bytes = long_label_request,
         .origin = "zero://inline",
         .window_id = 1,
     } });
-    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "Overlay label is too large") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "WebView label is too large") != null);
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
 
     var long_url = [_]u8{'a'} ** (platform.max_overlay_url_bytes + 1);
     var long_url_request_buffer: [platform.max_overlay_url_bytes + 256]u8 = undefined;
-    const long_url_request = try std.fmt.bufPrint(&long_url_request_buffer, "{{\"id\":\"long-url\",\"command\":\"zero-native.overlay.create\",\"payload\":{{\"label\":\"too-long-url\",\"url\":\"{s}\",\"frame\":{{\"width\":300,\"height\":200}}}}}}", .{&long_url});
+    const long_url_request = try std.fmt.bufPrint(&long_url_request_buffer, "{{\"id\":\"long-url\",\"command\":\"zero-native.webview.create\",\"payload\":{{\"label\":\"too-long-url\",\"url\":\"{s}\",\"frame\":{{\"width\":300,\"height\":200}}}}}}", .{&long_url});
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
         .bytes = long_url_request,
         .origin = "zero://inline",
         .window_id = 1,
     } });
-    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "Overlay URL is too large") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "WebView URL is too large") != null);
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"denied-url\",\"command\":\"zero-native.overlay.navigate\",\"payload\":{\"label\":\"preview\",\"url\":\"https://blocked.example\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"denied-url\",\"command\":\"zero-native.webview.navigate\",\"payload\":{\"label\":\"preview\",\"url\":\"https://blocked.example\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1568,7 +1704,7 @@ test "runtime validates overlay bridge commands" {
 
     harness.runtime.options.platform.services.set_overlay_zoom_fn = null;
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"unsupported-zoom\",\"command\":\"zero-native.overlay.setZoom\",\"payload\":{\"label\":\"preview\",\"zoom\":1.25}}",
+        .bytes = "{\"id\":\"unsupported-zoom\",\"command\":\"zero-native.webview.setZoom\",\"payload\":{\"label\":\"preview\",\"zoom\":1.25}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1576,7 +1712,7 @@ test "runtime validates overlay bridge commands" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"escaped\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"label\":\"preview \\\"quoted\\\"\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"escaped\",\"command\":\"zero-native.webview.create\",\"payload\":{\"label\":\"preview \\\"quoted\\\"\",\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1630,7 +1766,7 @@ test "runtime gates JavaScript webview API by origin and configured permission" 
     denied_origin.init(.{});
     denied_origin.runtime.options.js_window_api = true;
     try denied_origin.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
-        .bytes = "{\"id\":\"origin\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"origin\",\"command\":\"zero-native.webview.create\",\"payload\":{\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "https://example.invalid",
         .window_id = 1,
     } });
@@ -1642,7 +1778,7 @@ test "runtime gates JavaScript webview API by origin and configured permission" 
     denied_permission.runtime.options.js_window_api = true;
     denied_permission.runtime.options.security.permissions = &filesystem_only;
     try denied_permission.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
-        .bytes = "{\"id\":\"permission\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"permission\",\"command\":\"zero-native.webview.create\",\"payload\":{\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1657,7 +1793,7 @@ test "runtime gates JavaScript webview API by origin and configured permission" 
     allowed.runtime.options.security.navigation.allowed_origins = &overlay_origins;
     try allowed.runtime.dispatchPlatformEvent(app, .app_start);
     try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
-        .bytes = "{\"id\":\"allowed\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
+        .bytes = "{\"id\":\"allowed\",\"command\":\"zero-native.webview.create\",\"payload\":{\"url\":\"https://example.com\",\"frame\":{\"width\":300,\"height\":200}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
@@ -1674,7 +1810,7 @@ test "runtime gates built-in bridge commands through explicit policy" {
     const window_permissions = [_][]const u8{security.permission_window};
     const policies = [_]bridge.CommandPolicy{
         .{ .name = "zero-native.window.create", .permissions = &window_permissions, .origins = &.{"zero://inline"} },
-        .{ .name = "zero-native.overlay.create", .permissions = &window_permissions, .origins = &.{"zero://inline"} },
+        .{ .name = "zero-native.webview.create", .permissions = &window_permissions, .origins = &.{"zero://inline"} },
     };
 
     var harness: TestHarness() = undefined;
@@ -1694,7 +1830,7 @@ test "runtime gates built-in bridge commands through explicit policy" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
-        .bytes = "{\"id\":\"overlay\",\"command\":\"zero-native.overlay.create\",\"payload\":{\"label\":\"policy-overlay\",\"url\":\"https://example.com\",\"frame\":{\"width\":320,\"height\":240}}}",
+        .bytes = "{\"id\":\"webview\",\"command\":\"zero-native.webview.create\",\"payload\":{\"label\":\"policy-webview\",\"url\":\"https://example.com\",\"frame\":{\"width\":320,\"height\":240}}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });

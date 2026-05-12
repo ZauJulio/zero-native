@@ -64,9 +64,12 @@ pub const max_windows: usize = 16;
 pub const max_window_label_bytes: usize = 64;
 pub const max_window_title_bytes: usize = 128;
 pub const max_window_source_bytes: usize = 4096;
-pub const max_overlays: usize = 16;
-pub const max_overlay_label_bytes: usize = 64;
-pub const max_overlay_url_bytes: usize = 4096;
+pub const max_webviews: usize = 16;
+pub const max_webview_label_bytes: usize = 64;
+pub const max_webview_url_bytes: usize = 4096;
+pub const max_overlays: usize = max_webviews;
+pub const max_overlay_label_bytes: usize = max_webview_label_bytes;
+pub const max_overlay_url_bytes: usize = max_webview_url_bytes;
 
 pub const WindowRestorePolicy = enum {
     clamp_to_visible_screen,
@@ -144,20 +147,30 @@ pub const WindowCreateOptions = struct {
     }
 };
 
-pub const OverlayOptions = struct {
+pub const WebViewOptions = struct {
     window_id: WindowId = 1,
     label: []const u8,
     url: []const u8,
     frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
+    layer: i32 = 0,
+    transparent: bool = false,
+    bridge_enabled: bool = false,
 };
 
-pub const OverlayInfo = struct {
+pub const OverlayOptions = WebViewOptions;
+
+pub const WebViewInfo = struct {
     window_id: WindowId = 1,
-    label: []const u8 = "overlay",
+    label: []const u8 = "webview",
     url: []const u8 = "",
     frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
+    layer: i32 = 0,
+    transparent: bool = false,
+    bridge_enabled: bool = false,
     open: bool = true,
 };
+
+pub const OverlayInfo = WebViewInfo;
 
 pub const AppInfo = struct {
     app_name: []const u8 = "zero-native",
@@ -308,10 +321,11 @@ pub const PlatformServices = struct {
     create_window_fn: ?*const fn (context: ?*anyopaque, options: WindowOptions) anyerror!WindowInfo = null,
     focus_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     close_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
-    create_overlay_fn: ?*const fn (context: ?*anyopaque, options: OverlayOptions) anyerror!void = null,
+    create_overlay_fn: ?*const fn (context: ?*anyopaque, options: WebViewOptions) anyerror!void = null,
     set_overlay_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, frame: geometry.RectF) anyerror!void = null,
     navigate_overlay_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, url: []const u8) anyerror!void = null,
     set_overlay_zoom_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, zoom: f64) anyerror!void = null,
+    set_webview_layer_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, layer: i32) anyerror!void = null,
     close_overlay_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
     show_open_dialog_fn: ?*const fn (context: ?*anyopaque, options: OpenDialogOptions, buffer: []u8) anyerror!OpenDialogResult = null,
     show_save_dialog_fn: ?*const fn (context: ?*anyopaque, options: SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 = null,
@@ -371,29 +385,54 @@ pub const PlatformServices = struct {
         return close_fn(self.context, window_id);
     }
 
-    pub fn createOverlay(self: PlatformServices, options: OverlayOptions) anyerror!void {
+    pub fn createWebView(self: PlatformServices, options: WebViewOptions) anyerror!void {
         const create_fn = self.create_overlay_fn orelse return error.UnsupportedService;
         return create_fn(self.context, options);
     }
 
-    pub fn setOverlayFrame(self: PlatformServices, window_id: WindowId, label: []const u8, frame: geometry.RectF) anyerror!void {
+    pub fn createOverlay(self: PlatformServices, options: WebViewOptions) anyerror!void {
+        return self.createWebView(options);
+    }
+
+    pub fn setWebViewFrame(self: PlatformServices, window_id: WindowId, label: []const u8, frame: geometry.RectF) anyerror!void {
         const set_fn = self.set_overlay_frame_fn orelse return error.UnsupportedService;
         return set_fn(self.context, window_id, label, frame);
     }
 
-    pub fn navigateOverlay(self: PlatformServices, window_id: WindowId, label: []const u8, url: []const u8) anyerror!void {
+    pub fn setOverlayFrame(self: PlatformServices, window_id: WindowId, label: []const u8, frame: geometry.RectF) anyerror!void {
+        return self.setWebViewFrame(window_id, label, frame);
+    }
+
+    pub fn navigateWebView(self: PlatformServices, window_id: WindowId, label: []const u8, url: []const u8) anyerror!void {
         const navigate_fn = self.navigate_overlay_fn orelse return error.UnsupportedService;
         return navigate_fn(self.context, window_id, label, url);
     }
 
-    pub fn setOverlayZoom(self: PlatformServices, window_id: WindowId, label: []const u8, zoom: f64) anyerror!void {
+    pub fn navigateOverlay(self: PlatformServices, window_id: WindowId, label: []const u8, url: []const u8) anyerror!void {
+        return self.navigateWebView(window_id, label, url);
+    }
+
+    pub fn setWebViewZoom(self: PlatformServices, window_id: WindowId, label: []const u8, zoom: f64) anyerror!void {
         const zoom_fn = self.set_overlay_zoom_fn orelse return error.UnsupportedService;
         return zoom_fn(self.context, window_id, label, zoom);
     }
 
-    pub fn closeOverlay(self: PlatformServices, window_id: WindowId, label: []const u8) anyerror!void {
+    pub fn setOverlayZoom(self: PlatformServices, window_id: WindowId, label: []const u8, zoom: f64) anyerror!void {
+        return self.setWebViewZoom(window_id, label, zoom);
+    }
+
+    pub fn setWebViewLayer(self: PlatformServices, window_id: WindowId, label: []const u8, layer: i32) anyerror!void {
+        const layer_fn = self.set_webview_layer_fn orelse return error.UnsupportedService;
+        return layer_fn(self.context, window_id, label, layer);
+    }
+
+    pub fn closeWebView(self: PlatformServices, window_id: WindowId, label: []const u8) anyerror!void {
         const close_fn = self.close_overlay_fn orelse return error.UnsupportedService;
         return close_fn(self.context, window_id, label);
+    }
+
+    pub fn closeOverlay(self: PlatformServices, window_id: WindowId, label: []const u8) anyerror!void {
+        return self.closeWebView(window_id, label);
     }
 
     pub fn showOpenDialog(self: PlatformServices, options: OpenDialogOptions, buffer: []u8) anyerror!OpenDialogResult {
@@ -508,6 +547,7 @@ pub const NullPlatform = struct {
                 .set_overlay_frame_fn = setOverlayFrame,
                 .navigate_overlay_fn = navigateOverlay,
                 .set_overlay_zoom_fn = setOverlayZoom,
+                .set_webview_layer_fn = setWebViewLayer,
                 .close_overlay_fn = closeOverlay,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .emit_window_event_fn = emitWindowEvent,
@@ -633,6 +673,9 @@ pub const NullPlatform = struct {
         var overlay = &self.overlays[index];
         overlay.window_id = options.window_id;
         overlay.frame = options.frame;
+        overlay.layer = options.layer;
+        overlay.transparent = options.transparent;
+        overlay.bridge_enabled = options.bridge_enabled;
         overlay.open = true;
         @memcpy(overlay.label_storage[0..options.label.len], options.label);
         @memcpy(overlay.url_storage[0..options.url.len], options.url);
@@ -662,6 +705,12 @@ pub const NullPlatform = struct {
         const index = self.findOverlayIndex(window_id, label) orelse return error.OverlayNotFound;
         if (zoom < 0.25 or zoom > 5.0) return error.InvalidOverlayOptions;
         self.overlays[index].zoom = zoom;
+    }
+
+    fn setWebViewLayer(context: ?*anyopaque, window_id: WindowId, label: []const u8, layer: i32) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findOverlayIndex(window_id, label) orelse return error.OverlayNotFound;
+        self.overlays[index].layer = layer;
     }
 
     fn closeOverlay(context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void {
@@ -730,6 +779,9 @@ const NullOverlay = struct {
     label: []const u8 = "",
     url: []const u8 = "",
     frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
+    layer: i32 = 0,
+    transparent: bool = false,
+    bridge_enabled: bool = false,
     zoom: f64 = 1.0,
     open: bool = false,
     label_storage: [max_overlay_label_bytes]u8 = undefined,

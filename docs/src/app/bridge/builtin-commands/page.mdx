@@ -1,6 +1,6 @@
 # Builtin Commands
 
-zero-native provides built-in bridge commands for window management, overlay WebViews, and native dialogs. These are controlled by the `builtin_bridge` policy in `RuntimeOptions`, separate from app-defined commands.
+zero-native provides built-in bridge commands for window management, layered WebViews, and native dialogs. These are controlled by the `builtin_bridge` policy in `RuntimeOptions`, separate from app-defined commands.
 
 ## Window commands
 
@@ -38,7 +38,7 @@ zero-native provides built-in bridge commands for window management, overlay Web
 
 Window commands are available through `window.zero.windows.*` when `js_window_api` is `true`, but the runtime still checks the request origin and the `window` permission when permissions are configured. Use an explicit `builtin_bridge` policy when you want per-command origin lists.
 
-## Overlay WebView commands
+## WebView Commands
 
 <table>
   <thead>
@@ -50,36 +50,46 @@ Window commands are available through `window.zero.windows.*` when `js_window_ap
   </thead>
   <tbody>
     <tr>
-      <td><code>zero-native.overlay.create</code></td>
+      <td><code>zero-native.webview.create</code></td>
       <td><code>window</code></td>
-      <td>Create an isolated overlay WebView above a window</td>
+      <td>Create a named WebView in a window</td>
     </tr>
     <tr>
-      <td><code>zero-native.overlay.setFrame</code></td>
+      <td><code>zero-native.webview.list</code></td>
       <td><code>window</code></td>
-      <td>Move or resize an overlay WebView</td>
+      <td>List WebViews in the calling window</td>
     </tr>
     <tr>
-      <td><code>zero-native.overlay.navigate</code></td>
+      <td><code>zero-native.webview.setFrame</code></td>
       <td><code>window</code></td>
-      <td>Navigate an overlay WebView</td>
+      <td>Move or resize a WebView</td>
     </tr>
     <tr>
-      <td><code>zero-native.overlay.setZoom</code></td>
+      <td><code>zero-native.webview.navigate</code></td>
       <td><code>window</code></td>
-      <td>Set overlay page zoom from <code>0.25</code> to <code>5.0</code></td>
+      <td>Navigate a WebView</td>
     </tr>
     <tr>
-      <td><code>zero-native.overlay.close</code></td>
+      <td><code>zero-native.webview.setZoom</code></td>
       <td><code>window</code></td>
-      <td>Close an overlay WebView</td>
+      <td>Set page zoom from <code>0.25</code> to <code>5.0</code></td>
+    </tr>
+    <tr>
+      <td><code>zero-native.webview.setLayer</code></td>
+      <td><code>window</code></td>
+      <td>Change native stack order</td>
+    </tr>
+    <tr>
+      <td><code>zero-native.webview.close</code></td>
+      <td><code>window</code></td>
+      <td>Close a WebView</td>
     </tr>
   </tbody>
 </table>
 
-Overlay commands are available through `window.zero.webviews.*` when `js_window_api` is `true`. They use the same origin and `window` permission checks as window commands. Overlay URLs are also checked against `security.navigation.allowed_origins`.
+WebView commands are available through `window.zero.webviews.*` when `js_window_api` is `true`. They use the same origin and `window` permission checks as window commands. WebView URLs are also checked against `security.navigation.allowed_origins`.
 
-If `windowId` is omitted, the runtime uses the window that sent the bridge message. If provided, `windowId` must match that same calling window. Overlay pages are isolated by default and do not receive `window.zero`.
+If `windowId` is omitted, the runtime uses the window that sent the bridge message. If provided, `windowId` must match that same calling window. Child WebViews are isolated by default and receive `window.zero` only when created with `bridge: true`.
 
 ## Dialog commands
 
@@ -122,11 +132,13 @@ const app_permissions = [_][]const u8{zero_native.security.permission_window};
     .commands = &.{
         .{ .name = "zero-native.window.list", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
         .{ .name = "zero-native.window.create", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
-        .{ .name = "zero-native.overlay.create", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
-        .{ .name = "zero-native.overlay.setFrame", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
-        .{ .name = "zero-native.overlay.navigate", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
-        .{ .name = "zero-native.overlay.setZoom", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
-        .{ .name = "zero-native.overlay.close", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.webview.create", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.webview.list", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.webview.setFrame", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.webview.navigate", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.webview.setZoom", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.webview.setLayer", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
+        .{ .name = "zero-native.webview.close", .permissions = .{ "window" }, .origins = .{ "zero://app" } },
         .{ .name = "zero-native.dialog.openFile", .origins = .{ "zero://app" } },
         .{ .name = "zero-native.dialog.showMessage", .origins = .{ "zero://app" } },
     },
@@ -147,9 +159,12 @@ const preview = await window.zero.webviews.create({
   label: "preview",
   url: "https://example.com",
   frame: { x: 24, y: 24, width: 480, height: 320 },
+  layer: 10,
+  bridge: false,
 });
 
 await preview.setZoom(1.25);
+await preview.setLayer(20);
 await preview.close();
 
 const files = await window.zero.invoke("zero-native.dialog.openFile", {
@@ -166,4 +181,4 @@ const result = await window.zero.invoke("zero-native.dialog.showMessage", {
 });
 ```
 
-See also: [Overlay WebViews](/webviews) for frame semantics, [Dialogs](/dialogs) for the full dialog type reference, and [Security](/security) for policy details.
+See also: [Multiple WebViews](/webviews) for frame and layer semantics, [Dialogs](/dialogs) for the full dialog type reference, and [Security](/security) for policy details.
