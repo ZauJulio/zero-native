@@ -827,7 +827,7 @@ static const char *ZeroNativeCefBridgeScript() {
     if (!browser) return;
     CefRefPtr<CefFrame> frame = browser->GetMainFrame();
     if (!frame) return;
-    NSData *nameData = [NSJSONSerialization dataWithJSONObject:name ?: @"" options:0 error:nil];
+    NSData *nameData = [NSJSONSerialization dataWithJSONObject:name ?: @"" options:NSJSONWritingFragmentsAllowed error:nil];
     NSString *nameJSON = nameData ? [[NSString alloc] initWithData:nameData encoding:NSUTF8StringEncoding] : @"\"\"";
     NSString *detail = detailJSON.length > 0 ? detailJSON : @"null";
     NSString *script = [NSString stringWithFormat:@"window.zero&&window.zero._emit(%@,%@);", nameJSON, detail];

@@ -48,7 +48,7 @@ The WebView is treated as untrusted by default. Native commands, permissions, na
 
 ## Status
 
-zero-native is pre-release. Desktop support now covers macOS, Linux, and Windows build paths, with Chromium/CEF distributed as platform-specific runtimes.
+zero-native is pre-release. Desktop support now covers macOS 11+, Linux, and Windows build paths, with Chromium/CEF distributed as platform-specific runtimes.
 
 ## Core Concepts
 

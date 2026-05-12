@@ -169,7 +169,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\;
         \\
         \\pub fn build(b: *std.Build) void {
-        \\    const target = b.standardTargetOptions(.{});
+        \\    const target = zeroNativeTarget(b);
         \\    const optimize = b.standardOptimizeOption(.{});
         \\    const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
         \\    const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
@@ -286,6 +286,38 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    test_step.dependOn(&b.addRunArtifact(tests).step);
         \\}
         \\
+        \\fn zeroNativeTarget(b: *std.Build) std.Build.ResolvedTarget {
+        \\    const target = b.standardTargetOptions(.{});
+        \\    if (target.result.os.tag != .macos) return target;
+        \\
+        \\    if (b.sysroot == null) {
+        \\        b.sysroot = macosSdkPath(b) orelse b.sysroot;
+        \\    }
+        \\
+        \\    var query = target.query;
+        \\    query.os_tag = .macos;
+        \\    query.os_version_min = .{ .semver = .{ .major = 11, .minor = 0, .patch = 0 } };
+        \\    return b.resolveTargetQuery(query);
+        \\}
+        \\
+        \\fn macosSdkPath(b: *std.Build) ?[]const u8 {
+        \\    if (b.graph.environ_map.get("SDKROOT")) |sdkroot| {
+        \\        if (sdkroot.len > 0) return sdkroot;
+        \\    }
+        \\
+        \\    const result = std.process.run(b.allocator, b.graph.io, .{
+        \\        .argv = &.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" },
+        \\        .stdout_limit = .limited(4096),
+        \\        .stderr_limit = .limited(4096),
+        \\    }) catch return null;
+        \\    defer b.allocator.free(result.stderr);
+        \\    if (result.term != .exited or result.term.exited != 0) {
+        \\        b.allocator.free(result.stdout);
+        \\        return null;
+        \\    }
+        \\    return std.mem.trimEnd(u8, result.stdout, "\r\n");
+        \\}
+        \\
         \\fn localModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, path: []const u8) *std.Build.Module {
         \\    return b.createModule(.{
         \\        .root_source_file = b.path(path),
@@ -335,7 +367,9 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    if (platform == .macos) {
         \\        switch (web_engine) {
         \\            .system => {
-        \\                app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/macos/appkit_host.m"), .flags = &.{ "-fobjc-arc", "-ObjC" } });
+        \\                const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
+        \\                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-ObjC", "-mmacosx-version-min=11.0" };
+        \\                app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/macos/appkit_host.m"), .flags = flags });
         \\                app_mod.linkFramework("WebKit", .{});
         \\            },
         \\            .chromium => {
@@ -347,12 +381,17 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                exe.step.dependOn(&cef_check.step);
         \\                const include_arg = b.fmt("-I{s}", .{cef_dir});
         \\                const define_arg = b.fmt("-DZERO_NATIVE_CEF_DIR=\"{s}\"", .{cef_dir});
-        \\                app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/macos/cef_host.mm"), .flags = &.{ "-fobjc-arc", "-ObjC++", "-std=c++17", "-stdlib=libc++", include_arg, define_arg } });
+        \\                const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
+        \\                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include, include_arg, define_arg } else &.{ "-fobjc-arc", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", include_arg, define_arg };
+        \\                app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/macos/cef_host.mm"), .flags = flags });
         \\                app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.a", .{cef_dir})));
         \\                app_mod.addFrameworkPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
         \\                app_mod.linkFramework("Chromium Embedded Framework", .{});
         \\                app_mod.addRPath(.{ .cwd_relative = "@executable_path/Frameworks" });
         \\            },
+        \\        }
+        \\        if (b.sysroot) |sysroot| {
+        \\            app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
         \\        }
         \\        app_mod.linkFramework("AppKit", .{});
         \\        app_mod.linkFramework("Foundation", .{});
@@ -720,8 +759,8 @@ fn runnerZig() []const u8 {
     \\        try runMacos(app, options, init);
     \\    } else if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
     \\        try runLinux(app, options, init);
-        \\    } else if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
-        \\        try runWindows(app, options, init);
+    \\    } else if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
+    \\        try runWindows(app, options, init);
     \\    } else {
     \\        try runNull(app, options, init);
     \\    }
@@ -828,40 +867,40 @@ fn runnerZig() []const u8 {
     \\    try runtime.run(app);
     \\}
     \\
-        \\fn runWindows(app: zero_native.App, options: RunOptions, init: std.process.Init) !void {
-        \\    var buffers: StateBuffers = undefined;
-        \\    var app_info = options.appInfo();
-        \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-        \\    var windows_platform = try zero_native.platform.windows.WindowsPlatform.initWithOptions(zero_native.geometry.SizeF.init(720, 480), webEngine(), app_info);
-        \\    defer windows_platform.deinit();
-        \\    var trace_sink = StdoutTraceSink{};
-        \\    var log_buffers: zero_native.debug.LogPathBuffers = .{};
-        \\    const log_setup = zero_native.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
-        \\    if (log_setup) |setup| zero_native.debug.installPanicCapture(init.io, setup.paths);
-        \\    var file_trace_sink: zero_native.debug.FileTraceSink = undefined;
-        \\    var fanout_sinks: [2]zero_native.trace.Sink = undefined;
-        \\    var fanout_sink: zero_native.debug.FanoutTraceSink = undefined;
-        \\    var runtime_trace_sink = trace_sink.sink();
-        \\    if (log_setup) |setup| {
-        \\        file_trace_sink = zero_native.debug.FileTraceSink.init(init.io, setup.paths.log_dir, setup.paths.log_file, setup.format);
-        \\        fanout_sinks = .{ trace_sink.sink(), file_trace_sink.sink() };
-        \\        fanout_sink = .{ .sinks = &fanout_sinks };
-        \\        runtime_trace_sink = fanout_sink.sink();
-        \\    }
-        \\    var runtime = zero_native.Runtime.init(.{
-        \\        .platform = windows_platform.platform(),
-        \\        .trace_sink = runtime_trace_sink,
-        \\        .log_path = if (log_setup) |setup| setup.paths.log_file else null,
-        \\        .bridge = options.bridge,
-        \\        .builtin_bridge = options.builtin_bridge,
-        \\        .security = options.security,
-        \\        .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
-        \\        .window_state_store = store,
-        \\    });
-        \\
-        \\    try runtime.run(app);
-        \\}
-        \\
+    \\fn runWindows(app: zero_native.App, options: RunOptions, init: std.process.Init) !void {
+    \\    var buffers: StateBuffers = undefined;
+    \\    var app_info = options.appInfo();
+    \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    \\    var windows_platform = try zero_native.platform.windows.WindowsPlatform.initWithOptions(zero_native.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    \\    defer windows_platform.deinit();
+    \\    var trace_sink = StdoutTraceSink{};
+    \\    var log_buffers: zero_native.debug.LogPathBuffers = .{};
+    \\    const log_setup = zero_native.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
+    \\    if (log_setup) |setup| zero_native.debug.installPanicCapture(init.io, setup.paths);
+    \\    var file_trace_sink: zero_native.debug.FileTraceSink = undefined;
+    \\    var fanout_sinks: [2]zero_native.trace.Sink = undefined;
+    \\    var fanout_sink: zero_native.debug.FanoutTraceSink = undefined;
+    \\    var runtime_trace_sink = trace_sink.sink();
+    \\    if (log_setup) |setup| {
+    \\        file_trace_sink = zero_native.debug.FileTraceSink.init(init.io, setup.paths.log_dir, setup.paths.log_file, setup.format);
+    \\        fanout_sinks = .{ trace_sink.sink(), file_trace_sink.sink() };
+    \\        fanout_sink = .{ .sinks = &fanout_sinks };
+    \\        runtime_trace_sink = fanout_sink.sink();
+    \\    }
+    \\    var runtime = zero_native.Runtime.init(.{
+    \\        .platform = windows_platform.platform(),
+    \\        .trace_sink = runtime_trace_sink,
+    \\        .log_path = if (log_setup) |setup| setup.paths.log_file else null,
+    \\        .bridge = options.bridge,
+    \\        .builtin_bridge = options.builtin_bridge,
+    \\        .security = options.security,
+    \\        .automation = if (build_options.automation) zero_native.automation.Server.init(init.io, ".zig-cache/zero-native-automation", app_info.resolvedWindowTitle()) else null,
+    \\        .window_state_store = store,
+    \\    });
+    \\
+    \\    try runtime.run(app);
+    \\}
+    \\
     \\fn shouldTrace(record: zero_native.trace.Record) bool {
     \\    if (comptime std.mem.eql(u8, build_options.trace, "off")) return false;
     \\    if (comptime std.mem.eql(u8, build_options.trace, "all")) return true;

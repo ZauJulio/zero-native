@@ -304,6 +304,8 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
         \\  <string>{s}</string>
         \\  <key>CFBundlePackageType</key>
         \\  <string>APPL</string>
+        \\  <key>LSMinimumSystemVersion</key>
+        \\  <string>11.0</string>
         \\  <key>CFBundleShortVersionString</key>
         \\  <string>{s}</string>
         \\  <key>CFBundleVersion</key>
@@ -835,6 +837,8 @@ test "plist template includes identity executable and version" {
     try std.testing.expect(std.mem.indexOf(u8, plist, "dev.example.app") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "Demo App") != null);
     try std.testing.expect(std.mem.indexOf(u8, plist, "icon.icns") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "LSMinimumSystemVersion") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "11.0") != null);
 }
 
 test "chromium desktop packages require a matching CEF layout" {

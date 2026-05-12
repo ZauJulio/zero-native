@@ -30,7 +30,7 @@ const default_zero_native_path = "../..";
 const app_exe_name = "react";
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const target = zeroNativeTarget(b);
     const optimize = b.standardOptimizeOption(.{});
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
     const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
@@ -144,6 +144,38 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
+fn zeroNativeTarget(b: *std.Build) std.Build.ResolvedTarget {
+    const target = b.standardTargetOptions(.{});
+    if (target.result.os.tag != .macos) return target;
+
+    if (b.sysroot == null) {
+        b.sysroot = macosSdkPath(b) orelse b.sysroot;
+    }
+
+    var query = target.query;
+    query.os_tag = .macos;
+    query.os_version_min = .{ .semver = .{ .major = 11, .minor = 0, .patch = 0 } };
+    return b.resolveTargetQuery(query);
+}
+
+fn macosSdkPath(b: *std.Build) ?[]const u8 {
+    if (b.graph.environ_map.get("SDKROOT")) |sdkroot| {
+        if (sdkroot.len > 0) return sdkroot;
+    }
+
+    const result = std.process.run(b.allocator, b.graph.io, .{
+        .argv = &.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(4096),
+    }) catch return null;
+    defer b.allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        b.allocator.free(result.stdout);
+        return null;
+    }
+    return std.mem.trimEnd(u8, result.stdout, "\r\n");
+}
+
 fn localModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, path: []const u8) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path(path),
@@ -193,7 +225,9 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
     if (platform == .macos) {
         switch (web_engine) {
             .system => {
-                app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/macos/appkit_host.m"), .flags = &.{ "-fobjc-arc", "-ObjC" } });
+                const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
+                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-ObjC", "-mmacosx-version-min=11.0" };
+                app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/macos/appkit_host.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
             },
             .chromium => {
@@ -205,12 +239,17 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 exe.step.dependOn(&cef_check.step);
                 const include_arg = b.fmt("-I{s}", .{cef_dir});
                 const define_arg = b.fmt("-DZERO_NATIVE_CEF_DIR=\"{s}\"", .{cef_dir});
-                app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/macos/cef_host.mm"), .flags = &.{ "-fobjc-arc", "-ObjC++", "-std=c++17", "-stdlib=libc++", include_arg, define_arg } });
+                const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
+                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include, include_arg, define_arg } else &.{ "-fobjc-arc", "-ObjC++", "-std=c++17", "-stdlib=libc++", "-mmacosx-version-min=11.0", include_arg, define_arg };
+                app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/macos/cef_host.mm"), .flags = flags });
                 app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.a", .{cef_dir})));
                 app_mod.addFrameworkPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
                 app_mod.linkFramework("Chromium Embedded Framework", .{});
                 app_mod.addRPath(.{ .cwd_relative = "@executable_path/Frameworks" });
             },
+        }
+        if (b.sysroot) |sysroot| {
+            app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
         }
         app_mod.linkFramework("AppKit", .{});
         app_mod.linkFramework("Foundation", .{});
@@ -244,7 +283,7 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         if (web_engine == .chromium) app_mod.linkSystemLibrary("stdc++", .{});
     } else if (platform == .windows) {
         switch (web_engine) {
-            .system => app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17" } }),
+            .system => app_mod.addCSourceFile(.{ .file = zeroNativePath(b, zero_native_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{"-std=c++17"} }),
             .chromium => {
                 const cef_check = addCefCheck(b, target, cef_dir);
                 if (cef_auto_install) {
@@ -295,37 +334,37 @@ fn addCefRuntimeRunFiles(b: *std.Build, target: std.Build.ResolvedTarget, run: *
 fn addCefCheck(b: *std.Build, target: std.Build.ResolvedTarget, cef_dir: []const u8) *std.Build.Step.Run {
     const script = switch (target.result.os.tag) {
         .macos => b.fmt(
-        \\test -f "{s}/include/cef_app.h" &&
-        \\test -d "{s}/Release/Chromium Embedded Framework.framework" &&
-        \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.a" || {{
-        \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
-        \\  echo "Expected:" >&2
-        \\  echo "  {s}/include/cef_app.h" >&2
-        \\  echo "  {s}/Release/Chromium Embedded Framework.framework" >&2
-        \\  echo "  {s}/libcef_dll_wrapper/libcef_dll_wrapper.a" >&2
-        \\  echo "Fix with: zero-native cef install --dir {s}" >&2
-        \\  echo "Or rerun with: -Dcef-auto-install=true" >&2
-        \\  echo "Pass -Dcef-dir=/path/to/cef if your bundle lives elsewhere." >&2
-        \\  exit 1
-        \\}}
+            \\test -f "{s}/include/cef_app.h" &&
+            \\test -d "{s}/Release/Chromium Embedded Framework.framework" &&
+            \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.a" || {{
+            \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
+            \\  echo "Expected:" >&2
+            \\  echo "  {s}/include/cef_app.h" >&2
+            \\  echo "  {s}/Release/Chromium Embedded Framework.framework" >&2
+            \\  echo "  {s}/libcef_dll_wrapper/libcef_dll_wrapper.a" >&2
+            \\  echo "Fix with: zero-native cef install --dir {s}" >&2
+            \\  echo "Or rerun with: -Dcef-auto-install=true" >&2
+            \\  echo "Pass -Dcef-dir=/path/to/cef if your bundle lives elsewhere." >&2
+            \\  exit 1
+            \\}}
         , .{ cef_dir, cef_dir, cef_dir, cef_dir, cef_dir, cef_dir, cef_dir }),
         .linux => b.fmt(
-        \\test -f "{s}/include/cef_app.h" &&
-        \\test -f "{s}/Release/libcef.so" &&
-        \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.a" || {{
-        \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
-        \\  echo "Fix with: zero-native cef install --dir {s}" >&2
-        \\  exit 1
-        \\}}
+            \\test -f "{s}/include/cef_app.h" &&
+            \\test -f "{s}/Release/libcef.so" &&
+            \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.a" || {{
+            \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
+            \\  echo "Fix with: zero-native cef install --dir {s}" >&2
+            \\  exit 1
+            \\}}
         , .{ cef_dir, cef_dir, cef_dir, cef_dir }),
         .windows => b.fmt(
-        \\test -f "{s}/include/cef_app.h" &&
-        \\test -f "{s}/Release/libcef.dll" &&
-        \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.lib" || {{
-        \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
-        \\  echo "Fix with: zero-native cef install --dir {s}" >&2
-        \\  exit 1
-        \\}}
+            \\test -f "{s}/include/cef_app.h" &&
+            \\test -f "{s}/Release/libcef.dll" &&
+            \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.lib" || {{
+            \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
+            \\  echo "Fix with: zero-native cef install --dir {s}" >&2
+            \\  exit 1
+            \\}}
         , .{ cef_dir, cef_dir, cef_dir, cef_dir }),
         else => "echo unsupported CEF target >&2; exit 1",
     };

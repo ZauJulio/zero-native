@@ -740,7 +740,7 @@ static NSURL *ZeroNativeAssetEntryURL(NSString *origin, NSString *entryPath) {
 
 - (void)emitEventNamed:(NSString *)name detailJSON:(NSString *)detailJSON windowId:(uint64_t)windowId {
     WKWebView *webView = [self webViewForWindowId:windowId];
-    NSData *nameData = [NSJSONSerialization dataWithJSONObject:name ?: @"" options:0 error:nil];
+    NSData *nameData = [NSJSONSerialization dataWithJSONObject:name ?: @"" options:NSJSONWritingFragmentsAllowed error:nil];
     NSString *nameJSON = nameData ? [[NSString alloc] initWithData:nameData encoding:NSUTF8StringEncoding] : @"\"\"";
     NSString *detail = detailJSON.length > 0 ? detailJSON : @"null";
     NSString *script = [NSString stringWithFormat:@"window.zero&&window.zero._emit(%@,%@);", nameJSON, detail];
