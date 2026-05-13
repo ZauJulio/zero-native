@@ -425,6 +425,8 @@ static const char *ZeroNativeCefBridgeScript() {
 - (BOOL)setWebViewLayerInWindow:(uint64_t)windowId label:(NSString *)label layer:(NSInteger)layer;
 - (BOOL)closeWebViewInWindow:(uint64_t)windowId label:(NSString *)label;
 - (void)closeWebViewsInWindow:(uint64_t)windowId;
+- (NSView *)stackViewForWindowId:(uint64_t)windowId;
+- (void)reorderWebViewsInWindow:(uint64_t)windowId;
 - (void)setBrowser:(CefRefPtr<CefBrowser>)browser windowId:(uint64_t)windowId;
 - (void)setWebViewBrowser:(CefRefPtr<CefBrowser>)browser key:(NSString *)key;
 - (void)cleanupClosedWebViewWithKey:(NSString *)key;
@@ -614,9 +616,14 @@ static const char *ZeroNativeCefBridgeScript() {
     [window setTitle:title.length > 0 ? title : @"zero-native"];
     if (!restoreFrame) [window center];
 
-    NSView *browserContainer = [[NSView alloc] initWithFrame:rect];
+    NSView *stackRoot = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
+    stackRoot.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    window.contentView = stackRoot;
+
+    NSView *browserContainer = [[NSView alloc] initWithFrame:stackRoot.bounds];
     browserContainer.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    window.contentView = browserContainer;
+    browserContainer.wantsLayer = YES;
+    [stackRoot addSubview:browserContainer positioned:NSWindowAbove relativeTo:nil];
 
     ZeroNativeChromiumWindowDelegate *delegate = [[ZeroNativeChromiumWindowDelegate alloc] init];
     delegate.host = self;
@@ -832,6 +839,11 @@ static const char *ZeroNativeCefBridgeScript() {
     return [NSString stringWithFormat:@"%llu:%@", windowId, label ?: @""];
 }
 
+- (NSView *)stackViewForWindowId:(uint64_t)windowId {
+    NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
+    return window.contentView;
+}
+
 - (NSRect)webViewFrameForContainer:(NSView *)container x:(double)x y:(double)y width:(double)width height:(double)height {
     CGFloat nativeY = container.isFlipped ? y : container.bounds.size.height - y - height;
     return NSMakeRect(x, nativeY, width, height);
@@ -840,20 +852,22 @@ static const char *ZeroNativeCefBridgeScript() {
 - (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled {
     if (label.length == 0 || url.length == 0 || width <= 0 || height <= 0 || x < 0 || y < 0) return NO;
     NSView *container = self.browserContainers[@(windowId)] ?: (windowId == 1 ? self.browserContainer : nil);
-    if (!container) return NO;
+    NSView *stackView = [self stackViewForWindowId:windowId];
+    if (!container || !stackView) return NO;
     NSURL *targetURL = [NSURL URLWithString:url];
     if (!targetURL || ![self allowsNavigationURL:targetURL]) return NO;
     NSString *key = [self webViewKeyForWindow:windowId label:label];
     if (self.webviewViews[key]) return NO;
 
-    NSView *webview = [[NSView alloc] initWithFrame:[self webViewFrameForContainer:container x:x y:y width:width height:height]];
-    webview.frame = [self webViewFrameForContainer:container x:x y:y width:width height:height];
+    NSView *webview = [[NSView alloc] initWithFrame:[self webViewFrameForContainer:stackView x:x y:y width:width height:height]];
+    webview.frame = [self webViewFrameForContainer:stackView x:x y:y width:width height:height];
     webview.autoresizingMask = NSViewNotSizable;
     webview.wantsLayer = YES;
     webview.layer.zPosition = layer;
     if (transparent) webview.layer.backgroundColor = NSColor.clearColor.CGColor;
-    [container addSubview:webview positioned:NSWindowAbove relativeTo:nil];
+    [stackView addSubview:webview positioned:NSWindowAbove relativeTo:nil];
     self.webviewViews[key] = webview;
+    [self reorderWebViewsInWindow:windowId];
 
     std::string keyString(key.UTF8String);
     CefRefPtr<ZeroNativeCefClient> client = new ZeroNativeCefClient(self, windowId, keyString, bridgeEnabled);
@@ -871,9 +885,11 @@ static const char *ZeroNativeCefBridgeScript() {
     NSView *container = self.browserContainers[@(windowId)] ?: (windowId == 1 ? self.browserContainer : nil);
     if ([label isEqualToString:@"main"]) {
         if (!container) return NO;
-        NSView *parent = container.superview;
+        NSView *parent = [self stackViewForWindowId:windowId];
         if (!parent) return NO;
+        container.autoresizingMask = NSViewNotSizable;
         container.frame = [self webViewFrameForContainer:parent x:x y:y width:width height:height];
+        [self reorderWebViewsInWindow:windowId];
         if (self.browsers) {
             auto it = self.browsers->find(windowId);
             if (it != self.browsers->end() && it->second) it->second->GetHost()->WasResized();
@@ -881,8 +897,10 @@ static const char *ZeroNativeCefBridgeScript() {
         return YES;
     }
     NSView *webview = self.webviewViews[[self webViewKeyForWindow:windowId label:label]];
-    if (!container || !webview) return NO;
-    webview.frame = [self webViewFrameForContainer:container x:x y:y width:width height:height];
+    NSView *stackView = [self stackViewForWindowId:windowId];
+    if (!container || !stackView || !webview) return NO;
+    webview.frame = [self webViewFrameForContainer:stackView x:x y:y width:width height:height];
+    [self reorderWebViewsInWindow:windowId];
     std::string keyString([self webViewKeyForWindow:windowId label:label].UTF8String);
     if (self.webviewBrowsers) {
         auto it = self.webviewBrowsers->find(keyString);
@@ -954,12 +972,14 @@ static const char *ZeroNativeCefBridgeScript() {
         if (!container) return NO;
         container.wantsLayer = YES;
         container.layer.zPosition = layer;
+        [self reorderWebViewsInWindow:windowId];
         return YES;
     }
     NSView *webview = self.webviewViews[[self webViewKeyForWindow:windowId label:label]];
     if (!webview) return NO;
     webview.wantsLayer = YES;
     webview.layer.zPosition = layer;
+    [self reorderWebViewsInWindow:windowId];
     return YES;
 }
 
@@ -991,6 +1011,46 @@ static const char *ZeroNativeCefBridgeScript() {
         NSRange separator = [key rangeOfString:@":"];
         NSString *label = separator.location == NSNotFound ? key : [key substringFromIndex:separator.location + 1];
         [self closeWebViewInWindow:windowId label:label];
+    }
+}
+
+- (void)reorderWebViewsInWindow:(uint64_t)windowId {
+    NSView *stackView = [self stackViewForWindowId:windowId];
+    if (!stackView) return;
+
+    NSMutableArray<NSView *> *views = [[NSMutableArray alloc] init];
+    NSView *mainView = self.browserContainers[@(windowId)] ?: (windowId == 1 ? self.browserContainer : nil);
+    if (mainView && mainView.superview == stackView) {
+        mainView.wantsLayer = YES;
+        [views addObject:mainView];
+    }
+
+    NSString *prefix = [NSString stringWithFormat:@"%llu:", windowId];
+    for (NSString *key in self.webviewViews) {
+        if (![key hasPrefix:prefix]) continue;
+        NSView *webView = self.webviewViews[key];
+        if (webView && webView.superview == stackView) {
+            webView.wantsLayer = YES;
+            [views addObject:webView];
+        }
+    }
+
+    [views sortUsingComparator:^NSComparisonResult(NSView *first, NSView *second) {
+        CGFloat firstLayer = first.layer.zPosition;
+        CGFloat secondLayer = second.layer.zPosition;
+        if (firstLayer < secondLayer) return NSOrderedAscending;
+        if (firstLayer > secondLayer) return NSOrderedDescending;
+        NSUInteger firstIndex = [stackView.subviews indexOfObjectIdenticalTo:first];
+        NSUInteger secondIndex = [stackView.subviews indexOfObjectIdenticalTo:second];
+        if (firstIndex < secondIndex) return NSOrderedAscending;
+        if (firstIndex > secondIndex) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+
+    NSView *previous = nil;
+    for (NSView *view in views) {
+        [stackView addSubview:view positioned:NSWindowAbove relativeTo:previous];
+        previous = view;
     }
 }
 

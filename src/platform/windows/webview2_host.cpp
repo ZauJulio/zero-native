@@ -8,6 +8,8 @@
 
 #include <climits>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -81,6 +83,11 @@ struct ChildWebView {
 #endif
 };
 
+struct HostLifetime {
+    std::recursive_mutex mutex;
+    bool alive = true;
+};
+
 struct Host {
     HINSTANCE instance = GetModuleHandleW(nullptr);
     std::string app_name;
@@ -98,6 +105,7 @@ struct Host {
     std::vector<std::string> allowed_origins;
     std::vector<std::string> allowed_external_urls;
     int external_link_action = 0;
+    std::shared_ptr<HostLifetime> lifetime = std::make_shared<HostLifetime>();
 };
 
 static std::string slice(const char *bytes, size_t len) {
@@ -250,18 +258,50 @@ static CreateEnvironmentFn webView2Factory() {
     return reinterpret_cast<CreateEnvironmentFn>(GetProcAddress(loader, "CreateCoreWebView2EnvironmentWithOptions"));
 }
 
+static void cleanupPendingChildWebView(Host *host, const std::string &key) {
+    if (!host) return;
+    auto found = host->webviews.find(key);
+    if (found == host->webviews.end()) return;
+    if (found->second.controller) found->second.controller->Close();
+    if (found->second.hwnd) DestroyWindow(found->second.hwnd);
+    host->webviews.erase(found);
+}
+
 static bool createChildWebView(Host *host, const std::string &key) {
     auto factory = webView2Factory();
     if (!factory) return false;
     auto found = host->webviews.find(key);
     if (found == host->webviews.end() || !found->second.hwnd) return false;
     HWND parent = found->second.hwnd;
+    std::weak_ptr<HostLifetime> lifetime = host->lifetime;
     HRESULT hr = factory(nullptr, nullptr, nullptr, Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-        [host, key, parent](HRESULT result, ICoreWebView2Environment *environment) -> HRESULT {
-            if (FAILED(result) || !environment) return result;
+        [host, key, parent, lifetime](HRESULT result, ICoreWebView2Environment *environment) -> HRESULT {
+            auto token = lifetime.lock();
+            if (!token) return S_OK;
+            std::lock_guard<std::recursive_mutex> guard(token->mutex);
+            if (!token->alive) return S_OK;
+            auto found = host->webviews.find(key);
+            if (found == host->webviews.end() || found->second.hwnd != parent || !IsWindow(parent)) return S_OK;
+            if (FAILED(result) || !environment) {
+                cleanupPendingChildWebView(host, key);
+                return result;
+            }
             return environment->CreateCoreWebView2Controller(parent, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                [host, key](HRESULT controller_result, ICoreWebView2Controller *controller) -> HRESULT {
-                    if (FAILED(controller_result) || !controller) return controller_result;
+                [host, key, lifetime](HRESULT controller_result, ICoreWebView2Controller *controller) -> HRESULT {
+                    auto token = lifetime.lock();
+                    if (!token) {
+                        if (controller) controller->Close();
+                        return S_OK;
+                    }
+                    std::lock_guard<std::recursive_mutex> guard(token->mutex);
+                    if (!token->alive) {
+                        if (controller) controller->Close();
+                        return S_OK;
+                    }
+                    if (FAILED(controller_result) || !controller) {
+                        cleanupPendingChildWebView(host, key);
+                        return controller_result;
+                    }
                     auto found = host->webviews.find(key);
                     if (found == host->webviews.end()) {
                         controller->Close();
@@ -276,7 +316,11 @@ static bool createChildWebView(Host *host, const std::string &key) {
                     if (found->second.webview) {
                         EventRegistrationToken token = {};
                         found->second.webview->add_NavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>(
-                            [host](ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
+                            [host, lifetime](ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
+                                auto token = lifetime.lock();
+                                if (!token) return S_OK;
+                                std::lock_guard<std::recursive_mutex> guard(token->mutex);
+                                if (!token->alive) return S_OK;
                                 LPWSTR uri_bytes = nullptr;
                                 if (!args || FAILED(args->get_Uri(&uri_bytes))) return S_OK;
                                 std::wstring uri_wide = uri_bytes ? std::wstring(uri_bytes) : std::wstring();
@@ -442,6 +486,9 @@ Host *zero_native_windows_create(const char *app_name, size_t app_name_len, cons
 
 void zero_native_windows_destroy(Host *host) {
     if (!host) return;
+    std::shared_ptr<HostLifetime> lifetime = host->lifetime;
+    std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
+    lifetime->alive = false;
     destroyAllWindows(host);
     delete host;
 }
