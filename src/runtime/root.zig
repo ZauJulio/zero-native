@@ -585,15 +585,18 @@ pub const Runtime = struct {
         const is_window = std.mem.startsWith(u8, request.command, "zero-native.window.");
         const is_webview = std.mem.startsWith(u8, request.command, "zero-native.webview.");
         const is_dialog = std.mem.startsWith(u8, request.command, "zero-native.dialog.");
-        if (!is_window and !is_webview and !is_dialog) return false;
+        const is_tray = std.mem.startsWith(u8, request.command, "zero-native.tray.");
+        if (!is_window and !is_webview and !is_dialog and !is_tray) return false;
 
         var response_buffer: [bridge.max_response_bytes]u8 = undefined;
         var result_buffer: [bridge.max_result_bytes]u8 = undefined;
-        if (!self.allowsBuiltinBridgeCommand(request.command, message.origin, is_window or is_webview)) {
+        if (!self.allowsBuiltinBridgeCommand(request.command, message.origin, is_window or is_webview or is_tray)) {
             const message_text = if (is_webview)
                 "WebView API is not permitted"
             else if (is_window)
                 "Window API is not permitted"
+            else if (is_tray)
+                "Tray API is not permitted"
             else
                 "Dialog API is not permitted";
             const result = bridge.writeErrorResponse(&response_buffer, request.id, .permission_denied, message_text);
@@ -605,6 +608,8 @@ pub const Runtime = struct {
             self.dispatchWindowBridgeCommand(request, message.window_id, &result_buffer, &response_buffer)
         else if (is_webview)
             self.dispatchWebViewBridgeCommand(request, message.window_id, &result_buffer, &response_buffer)
+        else if (is_tray)
+            self.dispatchTrayBridgeCommand(request, &result_buffer, &response_buffer)
         else
             self.dispatchDialogBridgeCommand(request, &result_buffer, &response_buffer);
 
@@ -713,6 +718,23 @@ pub const Runtime = struct {
         else
             return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown WebView command");
         return bridge.writeSuccessResponse(response_buffer, request.id, result);
+    }
+
+    fn dispatchTrayBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+        const result = if (std.mem.eql(u8, request.command, "zero-native.tray.update"))
+            self.updateTrayFromJson(request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else
+            return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown tray command");
+        return bridge.writeSuccessResponse(response_buffer, request.id, result);
+    }
+
+    fn updateTrayFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
+        var storage = json.StringStorage.init(output);
+        const tooltip = jsonStringField(payload, "tooltip", &storage) orelse "";
+        const attention = jsonBoolField(payload, "attention") orelse false;
+        try self.options.platform.services.setTray(tooltip, attention);
+        @memcpy(output[0..4], "null");
+        return output[0..4];
     }
 
     fn dispatchDialogBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {

@@ -83,6 +83,7 @@ typedef struct {
 zero_native_gtk_host_t *zero_native_gtk_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int decorated);
 void zero_native_gtk_destroy(zero_native_gtk_host_t *host);
 void zero_native_gtk_configure_webview_session(zero_native_gtk_host_t *host, const char *data_dir, size_t data_dir_len, const char *cache_dir, size_t cache_dir_len, const char *user_agent, size_t user_agent_len);
+void zero_native_gtk_tray_set(zero_native_gtk_host_t *host, const char *tooltip, size_t tooltip_len, int attention);
 void zero_native_gtk_run(zero_native_gtk_host_t *host, zero_native_gtk_event_callback_t callback, void *context);
 void zero_native_gtk_stop(zero_native_gtk_host_t *host);
 void zero_native_gtk_load_webview(zero_native_gtk_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback);

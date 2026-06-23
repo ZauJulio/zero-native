@@ -3,6 +3,7 @@
 #include <gtk/gtk.h>
 #include <webkit/webkit.h>
 #include <gio/gio.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -95,6 +96,14 @@ struct zero_native_gtk_host {
     guint notif_closed_sub;
     zero_native_notification_t notifications[ZERO_NATIVE_MAX_NOTIFICATIONS];
     int notification_count;
+
+    // System tray (StatusNotifierItem + com.canonical.dbusmenu).
+    int tray_active;
+    guint tray_sni_reg_id;
+    guint tray_menu_reg_id;
+    guint tray_watcher_watch;
+    char *tray_tooltip;
+    int tray_attention;
 };
 
 static char *zero_native_strndup(const char *s, size_t len) {
@@ -354,7 +363,10 @@ static const char *zero_native_bridge_script(void) {
         "setLayer:function(options){return invoke('zero-native.webview.setLayer',layerPayload(options));},"
         "close:function(options){return invoke('zero-native.webview.close',closePayload(options));}"
         "});"
-        "Object.defineProperty(window,'zero',{value:Object.freeze({invoke:invoke,on:on,off:off,windows:windows,dialogs:dialogs,webviews:webviews,_complete:complete,_emit:emit}),configurable:false});"
+        "var tray=Object.freeze({"
+        "update:function(options){return invoke('zero-native.tray.update',options||{});}"
+        "});"
+        "Object.defineProperty(window,'zero',{value:Object.freeze({invoke:invoke,on:on,off:off,windows:windows,dialogs:dialogs,webviews:webviews,tray:tray,_complete:complete,_emit:emit}),configurable:false});"
         "})();";
 }
 
@@ -533,9 +545,13 @@ static void on_focus(GtkWindow *window, GParamSpec *pspec, gpointer data) {
 }
 
 static gboolean on_close_request(GtkWindow *window, gpointer data) {
-    (void)window;
     zero_native_gtk_window_t *win = data;
     zero_native_gtk_host_t *host = win->host;
+    // Minimize the primary window to the tray instead of quitting.
+    if (host->tray_active && win->id == 1) {
+        gtk_widget_set_visible(GTK_WIDGET(window), FALSE);
+        return TRUE; // stop the default close
+    }
     int closed_index = -1;
     for (int i = 0; i < host->window_count; i++) {
         if (&host->windows[i] == win) {
@@ -901,6 +917,254 @@ static void zero_native_connect_webview_signals(zero_native_gtk_window_t *win, W
     g_signal_connect(wv, "notify::title", G_CALLBACK(on_child_title_changed), win);
 }
 
+// ── System tray: StatusNotifierItem + com.canonical.dbusmenu over GDBus ──
+
+#define ZERO_NATIVE_TRAY_ITEM_SHOW 1
+#define ZERO_NATIVE_TRAY_ITEM_QUIT 2
+
+static const char zero_native_sni_xml[] =
+    "<node><interface name='org.kde.StatusNotifierItem'>"
+    "<property name='Category' type='s' access='read'/>"
+    "<property name='Id' type='s' access='read'/>"
+    "<property name='Title' type='s' access='read'/>"
+    "<property name='Status' type='s' access='read'/>"
+    "<property name='IconName' type='s' access='read'/>"
+    "<property name='IconPixmap' type='a(iiay)' access='read'/>"
+    "<property name='AttentionIconName' type='s' access='read'/>"
+    "<property name='OverlayIconName' type='s' access='read'/>"
+    "<property name='ToolTip' type='(sa(iiay)ss)' access='read'/>"
+    "<property name='ItemIsMenu' type='b' access='read'/>"
+    "<property name='Menu' type='o' access='read'/>"
+    "<method name='Activate'><arg name='x' type='i' direction='in'/><arg name='y' type='i' direction='in'/></method>"
+    "<method name='SecondaryActivate'><arg name='x' type='i' direction='in'/><arg name='y' type='i' direction='in'/></method>"
+    "<method name='ContextMenu'><arg name='x' type='i' direction='in'/><arg name='y' type='i' direction='in'/></method>"
+    "<method name='Scroll'><arg name='delta' type='i' direction='in'/><arg name='orientation' type='s' direction='in'/></method>"
+    "<signal name='NewTitle'/><signal name='NewIcon'/><signal name='NewAttentionIcon'/>"
+    "<signal name='NewOverlayIcon'/><signal name='NewToolTip'/>"
+    "<signal name='NewStatus'><arg name='status' type='s'/></signal>"
+    "</interface></node>";
+
+static const char zero_native_dbusmenu_xml[] =
+    "<node><interface name='com.canonical.dbusmenu'>"
+    "<property name='Version' type='u' access='read'/>"
+    "<property name='Status' type='s' access='read'/>"
+    "<property name='TextDirection' type='s' access='read'/>"
+    "<property name='IconThemePath' type='as' access='read'/>"
+    "<method name='GetLayout'>"
+    "<arg name='parentId' type='i' direction='in'/><arg name='recursionDepth' type='i' direction='in'/>"
+    "<arg name='propertyNames' type='as' direction='in'/>"
+    "<arg name='revision' type='u' direction='out'/><arg name='layout' type='(ia{sv}av)' direction='out'/></method>"
+    "<method name='GetGroupProperties'>"
+    "<arg name='ids' type='ai' direction='in'/><arg name='propertyNames' type='as' direction='in'/>"
+    "<arg name='properties' type='a(ia{sv})' direction='out'/></method>"
+    "<method name='GetProperty'>"
+    "<arg name='id' type='i' direction='in'/><arg name='name' type='s' direction='in'/>"
+    "<arg name='value' type='v' direction='out'/></method>"
+    "<method name='Event'>"
+    "<arg name='id' type='i' direction='in'/><arg name='eventId' type='s' direction='in'/>"
+    "<arg name='data' type='v' direction='in'/><arg name='timestamp' type='u' direction='in'/></method>"
+    "<method name='AboutToShow'><arg name='id' type='i' direction='in'/><arg name='needUpdate' type='b' direction='out'/></method>"
+    "<signal name='LayoutUpdated'><arg name='revision' type='u'/><arg name='parent' type='i'/></signal>"
+    "<signal name='ItemsPropertiesUpdated'><arg name='updatedProps' type='a(ia{sv})'/><arg name='removedProps' type='a(ias)'/></signal>"
+    "</interface></node>";
+
+static GDBusNodeInfo *zero_native_sni_node = NULL;
+static GDBusNodeInfo *zero_native_dbusmenu_node = NULL;
+
+// Build the IconPixmap variant a(iiay) from a PNG file (ARGB32, network order).
+static GVariant *zero_native_tray_icon_pixmap(const char *icon_path) {
+    if (!icon_path || !icon_path[0]) return g_variant_new_array(G_VARIANT_TYPE("(iiay)"), NULL, 0);
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file_at_scale(icon_path, 32, 32, TRUE, NULL);
+    if (!pixbuf) return g_variant_new_array(G_VARIANT_TYPE("(iiay)"), NULL, 0);
+    int w = gdk_pixbuf_get_width(pixbuf);
+    int h = gdk_pixbuf_get_height(pixbuf);
+    int channels = gdk_pixbuf_get_n_channels(pixbuf);
+    int stride = gdk_pixbuf_get_rowstride(pixbuf);
+    const guchar *pixels = gdk_pixbuf_read_pixels(pixbuf);
+    gsize size = (gsize)w * h * 4;
+    guchar *argb = g_malloc(size);
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            const guchar *p = pixels + y * stride + x * channels;
+            guchar r = p[0], g = p[1], b = p[2];
+            guchar a = channels == 4 ? p[3] : 0xff;
+            guchar *o = argb + ((gsize)y * w + x) * 4;
+            o[0] = a; o[1] = r; o[2] = g; o[3] = b; // ARGB32, network byte order
+        }
+    }
+    GVariant *bytes = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, argb, size, 1);
+    GVariantBuilder builder;
+    g_variant_builder_init(&builder, G_VARIANT_TYPE("a(iiay)"));
+    g_variant_builder_add(&builder, "(ii@ay)", w, h, bytes);
+    g_free(argb);
+    g_object_unref(pixbuf);
+    return g_variant_builder_end(&builder);
+}
+
+static void zero_native_tray_toggle_window(zero_native_gtk_host_t *host) {
+    zero_native_gtk_window_t *win = zero_native_find_window(host, 1);
+    if (!win || !win->gtk_window) return;
+    if (gtk_widget_get_visible(GTK_WIDGET(win->gtk_window)) && gtk_window_is_active(win->gtk_window)) {
+        gtk_widget_set_visible(GTK_WIDGET(win->gtk_window), FALSE);
+    } else {
+        gtk_widget_set_visible(GTK_WIDGET(win->gtk_window), TRUE);
+        gtk_window_present(win->gtk_window);
+    }
+}
+
+static void zero_native_tray_invoke(zero_native_gtk_host_t *host, guint32 item_id) {
+    if (item_id == ZERO_NATIVE_TRAY_ITEM_QUIT) {
+        g_application_quit(G_APPLICATION(host->app));
+    } else {
+        zero_native_tray_toggle_window(host);
+    }
+}
+
+static GVariant *zero_native_menu_item_node(int id, const char *label) {
+    GVariantBuilder props;
+    g_variant_builder_init(&props, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&props, "{sv}", "label", g_variant_new_string(label));
+    g_variant_builder_add(&props, "{sv}", "enabled", g_variant_new_boolean(TRUE));
+    g_variant_builder_add(&props, "{sv}", "visible", g_variant_new_boolean(TRUE));
+    GVariantBuilder children;
+    g_variant_builder_init(&children, G_VARIANT_TYPE("av"));
+    return g_variant_new("(i@a{sv}@av)", id, g_variant_builder_end(&props), g_variant_builder_end(&children));
+}
+
+static void zero_native_sni_method(GDBusConnection *conn, const char *sender, const char *path, const char *iface, const char *method, GVariant *params, GDBusMethodInvocation *invocation, gpointer data) {
+    (void)conn; (void)sender; (void)path; (void)iface; (void)params;
+    zero_native_gtk_host_t *host = data;
+    if (g_strcmp0(method, "Activate") == 0 || g_strcmp0(method, "SecondaryActivate") == 0) {
+        zero_native_tray_toggle_window(host);
+    }
+    g_dbus_method_invocation_return_value(invocation, NULL);
+}
+
+static GVariant *zero_native_sni_get_property(GDBusConnection *conn, const char *sender, const char *path, const char *iface, const char *name, GError **error, gpointer data) {
+    (void)conn; (void)sender; (void)path; (void)iface; (void)error;
+    zero_native_gtk_host_t *host = data;
+    if (g_strcmp0(name, "Category") == 0) return g_variant_new_string("Communications");
+    if (g_strcmp0(name, "Id") == 0) return g_variant_new_string(host->bundle_id ? host->bundle_id : "zero-native");
+    if (g_strcmp0(name, "Title") == 0) return g_variant_new_string(host->app_name ? host->app_name : "zero-native");
+    if (g_strcmp0(name, "Status") == 0) return g_variant_new_string(host->tray_attention ? "NeedsAttention" : "Active");
+    if (g_strcmp0(name, "IconName") == 0) return g_variant_new_string(host->bundle_id ? host->bundle_id : "");
+    if (g_strcmp0(name, "AttentionIconName") == 0) return g_variant_new_string(host->bundle_id ? host->bundle_id : "");
+    if (g_strcmp0(name, "OverlayIconName") == 0) return g_variant_new_string("");
+    if (g_strcmp0(name, "IconPixmap") == 0) return zero_native_tray_icon_pixmap(host->icon_path);
+    if (g_strcmp0(name, "ItemIsMenu") == 0) return g_variant_new_boolean(FALSE);
+    if (g_strcmp0(name, "Menu") == 0) return g_variant_new_object_path("/MenuBar");
+    if (g_strcmp0(name, "ToolTip") == 0) {
+        const char *tip = host->tray_tooltip ? host->tray_tooltip : (host->app_name ? host->app_name : "");
+        GVariant *empty = g_variant_new_array(G_VARIANT_TYPE("(iiay)"), NULL, 0);
+        return g_variant_new("(s@a(iiay)ss)", "", empty, tip, "");
+    }
+    return NULL;
+}
+
+static const GDBusInterfaceVTable zero_native_sni_vtable = {
+    zero_native_sni_method, zero_native_sni_get_property, NULL, { 0 }
+};
+
+static void zero_native_dbusmenu_method(GDBusConnection *conn, const char *sender, const char *path, const char *iface, const char *method, GVariant *params, GDBusMethodInvocation *invocation, gpointer data) {
+    (void)conn; (void)sender; (void)path; (void)iface;
+    zero_native_gtk_host_t *host = data;
+    if (g_strcmp0(method, "GetLayout") == 0) {
+        GVariantBuilder root_props;
+        g_variant_builder_init(&root_props, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(&root_props, "{sv}", "children-display", g_variant_new_string("submenu"));
+        GVariantBuilder children;
+        g_variant_builder_init(&children, G_VARIANT_TYPE("av"));
+        g_variant_builder_add(&children, "v", zero_native_menu_item_node(ZERO_NATIVE_TRAY_ITEM_SHOW, "Show / Hide ZeroWhats"));
+        g_variant_builder_add(&children, "v", zero_native_menu_item_node(ZERO_NATIVE_TRAY_ITEM_QUIT, "Quit"));
+        GVariant *root = g_variant_new("(i@a{sv}@av)", 0, g_variant_builder_end(&root_props), g_variant_builder_end(&children));
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(u@(ia{sv}av))", 1u, root));
+        return;
+    }
+    if (g_strcmp0(method, "Event") == 0) {
+        gint32 id = 0; const char *event_id = NULL;
+        g_variant_get(params, "(i&svu)", &id, &event_id, NULL, NULL);
+        if (g_strcmp0(event_id, "clicked") == 0) zero_native_tray_invoke(host, (guint32)id);
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+    if (g_strcmp0(method, "AboutToShow") == 0) {
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(b)", FALSE));
+        return;
+    }
+    if (g_strcmp0(method, "GetGroupProperties") == 0) {
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(@a(ia{sv}))", g_variant_new_array(G_VARIANT_TYPE("(ia{sv})"), NULL, 0)));
+        return;
+    }
+    if (g_strcmp0(method, "GetProperty") == 0) {
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(v)", g_variant_new_string("")));
+        return;
+    }
+    g_dbus_method_invocation_return_value(invocation, NULL);
+}
+
+static GVariant *zero_native_dbusmenu_get_property(GDBusConnection *conn, const char *sender, const char *path, const char *iface, const char *name, GError **error, gpointer data) {
+    (void)conn; (void)sender; (void)path; (void)iface; (void)error; (void)data;
+    if (g_strcmp0(name, "Version") == 0) return g_variant_new_uint32(3);
+    if (g_strcmp0(name, "Status") == 0) return g_variant_new_string("normal");
+    if (g_strcmp0(name, "TextDirection") == 0) return g_variant_new_string("ltr");
+    if (g_strcmp0(name, "IconThemePath") == 0) return g_variant_new_array(G_VARIANT_TYPE_STRING, NULL, 0);
+    return NULL;
+}
+
+static const GDBusInterfaceVTable zero_native_dbusmenu_vtable = {
+    zero_native_dbusmenu_method, zero_native_dbusmenu_get_property, NULL, { 0 }
+};
+
+static void zero_native_sni_registered(GObject *source, GAsyncResult *res, gpointer data) {
+    (void)data;
+    GError *err = NULL;
+    GVariant *ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &err);
+    if (ret) g_variant_unref(ret);
+    if (err) g_error_free(err);
+}
+
+static void zero_native_tray_register(zero_native_gtk_host_t *host) {
+    GDBusConnection *bus = zero_native_host_bus(host);
+    if (!bus || host->tray_sni_reg_id) return;
+    if (!zero_native_sni_node) zero_native_sni_node = g_dbus_node_info_new_for_xml(zero_native_sni_xml, NULL);
+    if (!zero_native_dbusmenu_node) zero_native_dbusmenu_node = g_dbus_node_info_new_for_xml(zero_native_dbusmenu_xml, NULL);
+    if (!zero_native_sni_node || !zero_native_dbusmenu_node) return;
+
+    host->tray_sni_reg_id = g_dbus_connection_register_object(
+        bus, "/StatusNotifierItem", zero_native_sni_node->interfaces[0],
+        &zero_native_sni_vtable, host, NULL, NULL);
+    host->tray_menu_reg_id = g_dbus_connection_register_object(
+        bus, "/MenuBar", zero_native_dbusmenu_node->interfaces[0],
+        &zero_native_dbusmenu_vtable, host, NULL, NULL);
+
+    g_dbus_connection_call(bus,
+        "org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher",
+        "org.kde.StatusNotifierWatcher", "RegisterStatusNotifierItem",
+        g_variant_new("(s)", g_dbus_connection_get_unique_name(bus)),
+        NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, zero_native_sni_registered, host);
+}
+
+static void zero_native_tray_emit(zero_native_gtk_host_t *host, const char *signal_name) {
+    if (!host->bus) return;
+    g_dbus_connection_emit_signal(host->bus, NULL, "/StatusNotifierItem", "org.kde.StatusNotifierItem", signal_name, NULL, NULL);
+}
+
+// Public entry point: create the tray on first call, then update tooltip / attention.
+void zero_native_gtk_tray_set(zero_native_gtk_host_t *host, const char *tooltip, size_t tooltip_len, int attention) {
+    if (!host) return;
+    free(host->tray_tooltip);
+    host->tray_tooltip = tooltip_len > 0 ? zero_native_strndup(tooltip, tooltip_len) : NULL;
+    host->tray_attention = attention ? 1 : 0;
+    if (!host->tray_active) {
+        zero_native_tray_register(host);
+        host->tray_active = 1;
+    } else {
+        zero_native_tray_emit(host, "NewToolTip");
+        g_dbus_connection_emit_signal(host->bus, NULL, "/StatusNotifierItem", "org.kde.StatusNotifierItem",
+            "NewStatus", g_variant_new("(s)", host->tray_attention ? "NeedsAttention" : "Active"), NULL);
+    }
+}
+
 // Lazily create the shared, persistent network session. Cookies and the rest
 // of the website data are stored on disk so logins persist across restarts.
 static WebKitNetworkSession *zero_native_host_session(zero_native_gtk_host_t *host) {
@@ -1095,8 +1359,11 @@ void zero_native_gtk_destroy(zero_native_gtk_host_t *host) {
     if (host->bus) {
         if (host->notif_action_sub) g_dbus_connection_signal_unsubscribe(host->bus, host->notif_action_sub);
         if (host->notif_closed_sub) g_dbus_connection_signal_unsubscribe(host->bus, host->notif_closed_sub);
+        if (host->tray_sni_reg_id) g_dbus_connection_unregister_object(host->bus, host->tray_sni_reg_id);
+        if (host->tray_menu_reg_id) g_dbus_connection_unregister_object(host->bus, host->tray_menu_reg_id);
         g_object_unref(host->bus);
     }
+    free(host->tray_tooltip);
     if (host->session) g_object_unref(host->session);
     free(host->app_name);
     free(host->window_title);
@@ -1399,6 +1666,9 @@ int zero_native_gtk_create_webview(zero_native_gtk_host_t *host, uint64_t window
     webview->content_manager = manager;
     zero_native_apply_webview_frame(webview);
     gtk_overlay_add_overlay(GTK_OVERLAY(win->stack_root), GTK_WIDGET(web_view));
+    // Do not let the (large) child web view drive the toplevel size — otherwise
+    // its min content width inflates the window on every resize cycle.
+    gtk_overlay_set_measure_overlay(GTK_OVERLAY(win->stack_root), GTK_WIDGET(web_view), FALSE);
     if (transparent) {
         GdkRGBA transparent_color = {0, 0, 0, 0};
         webkit_web_view_set_background_color(web_view, &transparent_color);

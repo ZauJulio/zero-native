@@ -43,6 +43,7 @@ const GtkBridgeCallback = *const fn (context: ?*anyopaque, window_id: u64, webvi
 extern fn zero_native_gtk_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, decorated: c_int) ?*GtkHost;
 extern fn zero_native_gtk_destroy(host: *GtkHost) void;
 extern fn zero_native_gtk_configure_webview_session(host: *GtkHost, data_dir: [*]const u8, data_dir_len: usize, cache_dir: [*]const u8, cache_dir_len: usize, user_agent: [*]const u8, user_agent_len: usize) void;
+extern fn zero_native_gtk_tray_set(host: *GtkHost, tooltip: [*]const u8, tooltip_len: usize, attention: c_int) void;
 extern fn zero_native_gtk_run(host: *GtkHost, callback: GtkCallback, context: ?*anyopaque) void;
 extern fn zero_native_gtk_stop(host: *GtkHost) void;
 extern fn zero_native_gtk_load_webview(host: *GtkHost, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
@@ -189,6 +190,7 @@ pub const LinuxPlatform = struct {
                 .create_tray_fn = createTray,
                 .update_tray_menu_fn = updateTrayMenu,
                 .remove_tray_fn = removeTray,
+                .set_tray_fn = setTray,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .emit_window_event_fn = emitWindowEvent,
             },
@@ -495,9 +497,13 @@ fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOp
 }
 
 fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
-    _ = context;
-    _ = options;
-    return error.UnsupportedService;
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    zero_native_gtk_tray_set(self.host, options.tooltip.ptr, options.tooltip.len, 0);
+}
+
+fn setTray(context: ?*anyopaque, tooltip: []const u8, attention: bool) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    zero_native_gtk_tray_set(self.host, tooltip.ptr, tooltip.len, if (attention) 1 else 0);
 }
 
 fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem) anyerror!void {

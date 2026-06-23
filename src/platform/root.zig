@@ -349,6 +349,8 @@ pub const PlatformServices = struct {
     create_tray_fn: ?*const fn (context: ?*anyopaque, options: TrayOptions) anyerror!void = null,
     update_tray_menu_fn: ?*const fn (context: ?*anyopaque, items: []const TrayMenuItem) anyerror!void = null,
     remove_tray_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    // Create-or-update the tray with a tooltip and an attention (unread) flag.
+    set_tray_fn: ?*const fn (context: ?*anyopaque, tooltip: []const u8, attention: bool) anyerror!void = null,
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
 
@@ -492,6 +494,11 @@ pub const PlatformServices = struct {
         return remove_fn(self.context);
     }
 
+    pub fn setTray(self: PlatformServices, tooltip: []const u8, attention: bool) anyerror!void {
+        const set_fn = self.set_tray_fn orelse return error.UnsupportedService;
+        return set_fn(self.context, tooltip, attention);
+    }
+
     pub fn configureSecurityPolicy(self: PlatformServices, policy: security.Policy) anyerror!void {
         const configure_fn = self.configure_security_policy_fn orelse return error.UnsupportedService;
         return configure_fn(self.context, policy);
@@ -583,6 +590,7 @@ pub const NullPlatform = struct {
                 .set_webview_zoom_fn = setWebViewZoom,
                 .set_webview_layer_fn = setWebViewLayer,
                 .close_webview_fn = closeWebView,
+                .set_tray_fn = setTray,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .emit_window_event_fn = emitWindowEvent,
             },
@@ -730,6 +738,12 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         _ = edge;
         _ = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+    }
+
+    fn setTray(context: ?*anyopaque, tooltip: []const u8, attention: bool) anyerror!void {
+        _ = context;
+        _ = tooltip;
+        _ = attention;
     }
 
     fn createWebView(context: ?*anyopaque, options: WebViewOptions) anyerror!void {
