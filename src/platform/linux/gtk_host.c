@@ -2,6 +2,7 @@
 
 #include <gtk/gtk.h>
 #include <webkit/webkit.h>
+#include <gio/gio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -42,6 +43,17 @@ typedef struct zero_native_gtk_window {
     int webview_count;
 } zero_native_gtk_window_t;
 
+#define ZERO_NATIVE_MAX_NOTIFICATIONS 64
+
+// Maps a live desktop-notification id (from org.freedesktop.Notifications) back
+// to the WebKitNotification and the window that raised it, so a click on the
+// desktop notification can focus the window and notify the page.
+typedef struct zero_native_notification {
+    guint32 dbus_id;
+    WebKitNotification *notification; // owns a ref while pending
+    uint64_t window_id;
+} zero_native_notification_t;
+
 struct zero_native_gtk_host {
     GtkApplication *app;
     char *app_name;
@@ -76,6 +88,13 @@ struct zero_native_gtk_host {
     char *data_dir;
     char *cache_dir;
     char *user_agent;
+
+    // Desktop notifications forwarded to org.freedesktop.Notifications.
+    GDBusConnection *bus;
+    guint notif_action_sub;
+    guint notif_closed_sub;
+    zero_native_notification_t notifications[ZERO_NATIVE_MAX_NOTIFICATIONS];
+    int notification_count;
 };
 
 static char *zero_native_strndup(const char *s, size_t len) {
@@ -671,6 +690,171 @@ static void zero_native_setup_bridge(zero_native_gtk_window_t *win) {
     webkit_user_script_unref(script);
 }
 
+// ── Desktop notifications (org.freedesktop.Notifications over GDBus) ──
+
+static zero_native_notification_t *zero_native_notification_find_by_id(zero_native_gtk_host_t *host, guint32 dbus_id) {
+    for (int i = 0; i < host->notification_count; i++) {
+        if (host->notifications[i].dbus_id == dbus_id) return &host->notifications[i];
+    }
+    return NULL;
+}
+
+static zero_native_notification_t *zero_native_notification_find_by_object(zero_native_gtk_host_t *host, WebKitNotification *notification) {
+    for (int i = 0; i < host->notification_count; i++) {
+        if (host->notifications[i].notification == notification) return &host->notifications[i];
+    }
+    return NULL;
+}
+
+static void zero_native_notification_remove(zero_native_gtk_host_t *host, zero_native_notification_t *entry) {
+    if (!entry) return;
+    if (entry->notification) g_object_unref(entry->notification);
+    int index = (int)(entry - host->notifications);
+    if (index < 0 || index >= host->notification_count) return;
+    host->notifications[index] = host->notifications[host->notification_count - 1];
+    host->notification_count--;
+}
+
+static void zero_native_present_window(zero_native_gtk_host_t *host, uint64_t window_id) {
+    zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
+    if (win && win->gtk_window) {
+        gtk_window_unminimize(win->gtk_window);
+        gtk_window_present(win->gtk_window);
+    }
+}
+
+static void on_dbus_action_invoked(GDBusConnection *connection, const char *sender, const char *path, const char *iface, const char *signal_name, GVariant *params, gpointer data) {
+    (void)connection; (void)sender; (void)path; (void)iface; (void)signal_name;
+    zero_native_gtk_host_t *host = data;
+    guint32 id = 0;
+    const char *action = NULL;
+    g_variant_get(params, "(u&s)", &id, &action);
+    zero_native_notification_t *entry = zero_native_notification_find_by_id(host, id);
+    if (!entry) return;
+    // Let WhatsApp open the relevant chat, then raise our window.
+    webkit_notification_clicked(entry->notification);
+    zero_native_present_window(host, entry->window_id);
+}
+
+static void on_dbus_notification_closed(GDBusConnection *connection, const char *sender, const char *path, const char *iface, const char *signal_name, GVariant *params, gpointer data) {
+    (void)connection; (void)sender; (void)path; (void)iface; (void)signal_name;
+    zero_native_gtk_host_t *host = data;
+    guint32 id = 0, reason = 0;
+    g_variant_get(params, "(uu)", &id, &reason);
+    zero_native_notification_remove(host, zero_native_notification_find_by_id(host, id));
+}
+
+// Lazily connect to the session bus and subscribe to notification signals.
+static GDBusConnection *zero_native_host_bus(zero_native_gtk_host_t *host) {
+    if (host->bus) return host->bus;
+    host->bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (!host->bus) return NULL;
+    host->notif_action_sub = g_dbus_connection_signal_subscribe(
+        host->bus, "org.freedesktop.Notifications", "org.freedesktop.Notifications", "ActionInvoked",
+        "/org/freedesktop/Notifications", NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_dbus_action_invoked, host, NULL);
+    host->notif_closed_sub = g_dbus_connection_signal_subscribe(
+        host->bus, "org.freedesktop.Notifications", "org.freedesktop.Notifications", "NotificationClosed",
+        "/org/freedesktop/Notifications", NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_dbus_notification_closed, host, NULL);
+    return host->bus;
+}
+
+typedef struct {
+    zero_native_gtk_host_t *host;
+    WebKitNotification *notification; // owns a ref
+    uint64_t window_id;
+} zero_native_notify_ctx_t;
+
+static void on_dbus_notify_sent(GObject *source, GAsyncResult *res, gpointer user_data) {
+    zero_native_notify_ctx_t *ctx = user_data;
+    GError *err = NULL;
+    GVariant *ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &err);
+    if (!ret) {
+        if (err) g_error_free(err);
+        if (ctx->notification) g_object_unref(ctx->notification);
+        free(ctx);
+        return;
+    }
+    guint32 id = 0;
+    g_variant_get(ret, "(u)", &id);
+    g_variant_unref(ret);
+
+    zero_native_gtk_host_t *host = ctx->host;
+    if (host->notification_count < ZERO_NATIVE_MAX_NOTIFICATIONS) {
+        host->notifications[host->notification_count++] = (zero_native_notification_t){
+            .dbus_id = id,
+            .notification = ctx->notification, // transfer ownership
+            .window_id = ctx->window_id,
+        };
+    } else {
+        g_object_unref(ctx->notification);
+    }
+    free(ctx);
+}
+
+static void on_webkit_notification_closed(WebKitNotification *notification, gpointer data) {
+    zero_native_gtk_host_t *host = data;
+    zero_native_notification_t *entry = zero_native_notification_find_by_object(host, notification);
+    if (!entry) return;
+    GDBusConnection *bus = host->bus;
+    if (bus) {
+        g_dbus_connection_call(bus, "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications", "CloseNotification",
+            g_variant_new("(u)", entry->dbus_id), NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+    }
+    zero_native_notification_remove(host, entry);
+}
+
+static gboolean on_show_notification(WebKitWebView *web_view, WebKitNotification *notification, gpointer data) {
+    (void)web_view;
+    zero_native_gtk_window_t *win = data;
+    zero_native_gtk_host_t *host = win->host;
+    GDBusConnection *bus = zero_native_host_bus(host);
+    if (!bus) return FALSE; // let WebKit fall back to its default handling
+
+    const char *title = webkit_notification_get_title(notification);
+    const char *body = webkit_notification_get_body(notification);
+
+    GVariantBuilder actions;
+    g_variant_builder_init(&actions, G_VARIANT_TYPE("as"));
+    g_variant_builder_add(&actions, "s", "default");
+    g_variant_builder_add(&actions, "s", "Open");
+
+    GVariantBuilder hints;
+    g_variant_builder_init(&hints, G_VARIANT_TYPE("a{sv}"));
+    if (host->bundle_id) g_variant_builder_add(&hints, "{sv}", "desktop-entry", g_variant_new_string(host->bundle_id));
+
+    zero_native_notify_ctx_t *ctx = malloc(sizeof(*ctx));
+    ctx->host = host;
+    ctx->window_id = win->id;
+    ctx->notification = g_object_ref(notification);
+
+    g_dbus_connection_call(bus, "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications", "Notify",
+        g_variant_new("(susssasa{sv}i)",
+            host->app_name ? host->app_name : "zero-native", 0u,
+            host->icon_path ? host->icon_path : "",
+            title ? title : "", body ? body : "",
+            &actions, &hints, -1),
+        G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, on_dbus_notify_sent, ctx);
+
+    g_signal_connect(notification, "closed", G_CALLBACK(on_webkit_notification_closed), host);
+    return TRUE; // we own display of this notification
+}
+
+static gboolean on_permission_request(WebKitWebView *web_view, WebKitPermissionRequest *request, gpointer data) {
+    (void)web_view; (void)data;
+    if (WEBKIT_IS_NOTIFICATION_PERMISSION_REQUEST(request) || WEBKIT_IS_USER_MEDIA_PERMISSION_REQUEST(request)) {
+        webkit_permission_request_allow(request);
+        return TRUE;
+    }
+    return FALSE; // defer everything else to the default handler
+}
+
+static void zero_native_connect_webview_signals(zero_native_gtk_window_t *win, WebKitWebView *wv) {
+    g_signal_connect(wv, "permission-request", G_CALLBACK(on_permission_request), win);
+    g_signal_connect(wv, "show-notification", G_CALLBACK(on_show_notification), win);
+}
+
 // Lazily create the shared, persistent network session. Cookies and the rest
 // of the website data are stored on disk so logins persist across restarts.
 static WebKitNetworkSession *zero_native_host_session(zero_native_gtk_host_t *host) {
@@ -756,8 +940,14 @@ static zero_native_gtk_window_t *zero_native_create_window_internal(zero_native_
             NULL));
     win->web_view = wv;
     zero_native_apply_webview_settings(host, wv);
+    zero_native_connect_webview_signals(win, wv);
     if (!host->scheme_registered) {
-        webkit_web_context_register_uri_scheme(webkit_web_view_get_context(wv), "zero", zero_native_asset_scheme_request, host, NULL);
+        WebKitWebContext *context = webkit_web_view_get_context(wv);
+        webkit_web_context_register_uri_scheme(context, "zero", zero_native_asset_scheme_request, host, NULL);
+        // Treat app-local content as a secure context so it can use service
+        // workers, the Notification API and other secure-only web features.
+        WebKitSecurityManager *security = webkit_web_context_get_security_manager(context);
+        webkit_security_manager_register_uri_scheme_as_secure(security, "zero");
         host->scheme_registered = 1;
     }
     zero_native_setup_bridge(win);
@@ -849,6 +1039,14 @@ void zero_native_gtk_destroy(zero_native_gtk_host_t *host) {
         zero_native_clear_window(&host->windows[i]);
     }
     g_object_unref(host->app);
+    for (int i = 0; i < host->notification_count; i++) {
+        if (host->notifications[i].notification) g_object_unref(host->notifications[i].notification);
+    }
+    if (host->bus) {
+        if (host->notif_action_sub) g_dbus_connection_signal_unsubscribe(host->bus, host->notif_action_sub);
+        if (host->notif_closed_sub) g_dbus_connection_signal_unsubscribe(host->bus, host->notif_closed_sub);
+        g_object_unref(host->bus);
+    }
     if (host->session) g_object_unref(host->session);
     free(host->app_name);
     free(host->window_title);
@@ -1135,6 +1333,7 @@ int zero_native_gtk_create_webview(zero_native_gtk_host_t *host, uint64_t window
         return 0;
     }
     zero_native_apply_webview_settings(win->host, web_view);
+    zero_native_connect_webview_signals(win, web_view);
 
     zero_native_gtk_webview_t *webview = &win->webviews[win->webview_count++];
     memset(webview, 0, sizeof(*webview));
