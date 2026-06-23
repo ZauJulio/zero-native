@@ -42,6 +42,7 @@ const GtkBridgeCallback = *const fn (context: ?*anyopaque, window_id: u64, webvi
 
 extern fn zero_native_gtk_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, decorated: c_int) ?*GtkHost;
 extern fn zero_native_gtk_destroy(host: *GtkHost) void;
+extern fn zero_native_gtk_configure_webview_session(host: *GtkHost, data_dir: [*]const u8, data_dir_len: usize, cache_dir: [*]const u8, cache_dir_len: usize, user_agent: [*]const u8, user_agent_len: usize) void;
 extern fn zero_native_gtk_run(host: *GtkHost, callback: GtkCallback, context: ?*anyopaque) void;
 extern fn zero_native_gtk_stop(host: *GtkHost) void;
 extern fn zero_native_gtk_load_webview(host: *GtkHost, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
@@ -136,6 +137,7 @@ pub const LinuxPlatform = struct {
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
         const host = zero_native_gtk_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.decorated) 1 else 0) orelse return error.CreateFailed;
+        zero_native_gtk_configure_webview_session(host, app_info.data_dir.ptr, app_info.data_dir.len, app_info.cache_dir.ptr, app_info.cache_dir.len, app_info.user_agent.ptr, app_info.user_agent.len);
         return .{
             .host = host,
             .web_engine = web_engine,

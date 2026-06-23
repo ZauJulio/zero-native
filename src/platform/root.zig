@@ -183,6 +183,11 @@ pub const AppInfo = struct {
     icon_path: []const u8 = "",
     main_window: WindowOptions = .{},
     windows: []const WindowOptions = &.{},
+    // Persistent storage directory and user agent for web views. Empty values
+    // fall back to platform defaults (per-bundle XDG dirs / engine default UA).
+    data_dir: []const u8 = "",
+    cache_dir: []const u8 = "",
+    user_agent: []const u8 = "",
 
     pub fn resolvedWindowTitle(self: AppInfo) []const u8 {
         if (self.window_title.len > 0) return self.window_title;

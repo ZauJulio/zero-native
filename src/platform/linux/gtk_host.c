@@ -69,6 +69,13 @@ struct zero_native_gtk_host {
     int allowed_external_urls_count;
     int external_link_action;
     int scheme_registered;
+
+    // Persistent WebKit storage shared by every web view (cookies, IndexedDB,
+    // local storage, service workers) so the WhatsApp session survives restarts.
+    WebKitNetworkSession *session;
+    char *data_dir;
+    char *cache_dir;
+    char *user_agent;
 };
 
 static char *zero_native_strndup(const char *s, size_t len) {
@@ -664,6 +671,47 @@ static void zero_native_setup_bridge(zero_native_gtk_window_t *win) {
     webkit_user_script_unref(script);
 }
 
+// Lazily create the shared, persistent network session. Cookies and the rest
+// of the website data are stored on disk so logins persist across restarts.
+static WebKitNetworkSession *zero_native_host_session(zero_native_gtk_host_t *host) {
+    if (host->session) return host->session;
+
+    char *data_dir = host->data_dir
+        ? g_strdup(host->data_dir)
+        : g_build_filename(g_get_user_data_dir(), host->bundle_id ? host->bundle_id : "zero-native", NULL);
+    char *cache_dir = host->cache_dir
+        ? g_strdup(host->cache_dir)
+        : g_build_filename(g_get_user_cache_dir(), host->bundle_id ? host->bundle_id : "zero-native", NULL);
+    g_mkdir_with_parents(data_dir, 0700);
+    g_mkdir_with_parents(cache_dir, 0700);
+
+    host->session = webkit_network_session_new(data_dir, cache_dir);
+    if (host->session) {
+        WebKitCookieManager *cookies = webkit_network_session_get_cookie_manager(host->session);
+        char *cookie_file = g_build_filename(data_dir, "cookies.sqlite", NULL);
+        webkit_cookie_manager_set_persistent_storage(cookies, cookie_file, WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
+        webkit_cookie_manager_set_accept_policy(cookies, WEBKIT_COOKIE_POLICY_ACCEPT_ALWAYS);
+        g_free(cookie_file);
+    }
+    g_free(data_dir);
+    g_free(cache_dir);
+    return host->session;
+}
+
+// Apply the configured user agent and enable the web features WhatsApp Web
+// expects (media stream for calls, etc.).
+static void zero_native_apply_webview_settings(zero_native_gtk_host_t *host, WebKitWebView *wv) {
+    WebKitSettings *settings = webkit_web_view_get_settings(wv);
+    if (!settings) return;
+    if (host->user_agent && host->user_agent[0]) {
+        webkit_settings_set_user_agent(settings, host->user_agent);
+    }
+    webkit_settings_set_enable_media_stream(settings, TRUE);
+    webkit_settings_set_enable_mediasource(settings, TRUE);
+    webkit_settings_set_enable_webrtc(settings, TRUE);
+    webkit_settings_set_javascript_can_access_clipboard(settings, TRUE);
+}
+
 static zero_native_gtk_window_t *zero_native_create_window_internal(zero_native_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int decorated) {
     if (zero_native_find_window(host, window_id)) return NULL;
 
@@ -704,8 +752,10 @@ static zero_native_gtk_window_t *zero_native_create_window_internal(zero_native_
     WebKitWebView *wv = WEBKIT_WEB_VIEW(
         g_object_new(WEBKIT_TYPE_WEB_VIEW,
             "user-content-manager", win->content_manager,
+            "network-session", zero_native_host_session(host),
             NULL));
     win->web_view = wv;
+    zero_native_apply_webview_settings(host, wv);
     if (!host->scheme_registered) {
         webkit_web_context_register_uri_scheme(webkit_web_view_get_context(wv), "zero", zero_native_asset_scheme_request, host, NULL);
         host->scheme_registered = 1;
@@ -779,6 +829,19 @@ zero_native_gtk_host_t *zero_native_gtk_create(
     return host;
 }
 
+// Configure the persistent storage location and user agent for every web view.
+// Must be called before the windows are created (i.e. before run). Empty strings
+// fall back to per-bundle defaults under the XDG data/cache directories.
+void zero_native_gtk_configure_webview_session(zero_native_gtk_host_t *host, const char *data_dir, size_t data_dir_len, const char *cache_dir, size_t cache_dir_len, const char *user_agent, size_t user_agent_len) {
+    if (!host) return;
+    free(host->data_dir);
+    free(host->cache_dir);
+    free(host->user_agent);
+    host->data_dir = data_dir_len > 0 ? zero_native_strndup(data_dir, data_dir_len) : NULL;
+    host->cache_dir = cache_dir_len > 0 ? zero_native_strndup(cache_dir, cache_dir_len) : NULL;
+    host->user_agent = user_agent_len > 0 ? zero_native_strndup(user_agent, user_agent_len) : NULL;
+}
+
 void zero_native_gtk_destroy(zero_native_gtk_host_t *host) {
     if (!host) return;
     if (host->frame_timer) g_source_remove(host->frame_timer);
@@ -786,11 +849,15 @@ void zero_native_gtk_destroy(zero_native_gtk_host_t *host) {
         zero_native_clear_window(&host->windows[i]);
     }
     g_object_unref(host->app);
+    if (host->session) g_object_unref(host->session);
     free(host->app_name);
     free(host->window_title);
     free(host->bundle_id);
     free(host->icon_path);
     free(host->window_label);
+    free(host->data_dir);
+    free(host->cache_dir);
+    free(host->user_agent);
     zero_native_free_string_list(host->allowed_origins, host->allowed_origins_count);
     zero_native_free_string_list(host->allowed_external_urls, host->allowed_external_urls_count);
     free(host);
@@ -1059,6 +1126,7 @@ int zero_native_gtk_create_webview(zero_native_gtk_host_t *host, uint64_t window
     WebKitWebView *web_view = WEBKIT_WEB_VIEW(
         g_object_new(WEBKIT_TYPE_WEB_VIEW,
             "user-content-manager", manager,
+            "network-session", zero_native_host_session(win->host),
             NULL));
     g_object_unref(manager);
     if (!web_view) {
@@ -1066,6 +1134,7 @@ int zero_native_gtk_create_webview(zero_native_gtk_host_t *host, uint64_t window
         free(url_copy);
         return 0;
     }
+    zero_native_apply_webview_settings(win->host, web_view);
 
     zero_native_gtk_webview_t *webview = &win->webviews[win->webview_count++];
     memset(webview, 0, sizeof(*webview));
