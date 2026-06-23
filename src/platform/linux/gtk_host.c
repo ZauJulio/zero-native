@@ -3,10 +3,12 @@
 #include <gtk/gtk.h>
 #include <webkit/webkit.h>
 #include <gio/gio.h>
+#include <glib/gstdio.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #define ZERO_NATIVE_MAX_WINDOWS 16
 #define ZERO_NATIVE_MAX_WEBVIEWS 16
@@ -104,6 +106,7 @@ struct zero_native_gtk_host {
     guint tray_watcher_watch;
     char *tray_tooltip;
     int tray_attention;
+    int muted; // suppress notification sound when set
 };
 
 static char *zero_native_strndup(const char *s, size_t len) {
@@ -838,6 +841,7 @@ static gboolean on_show_notification(WebKitWebView *web_view, WebKitNotification
     GVariantBuilder hints;
     g_variant_builder_init(&hints, G_VARIANT_TYPE("a{sv}"));
     if (host->bundle_id) g_variant_builder_add(&hints, "{sv}", "desktop-entry", g_variant_new_string(host->bundle_id));
+    if (!host->muted) g_variant_builder_add(&hints, "{sv}", "sound-name", g_variant_new_string("message-new-instant"));
 
     zero_native_notify_ctx_t *ctx = malloc(sizeof(*ctx));
     ctx->host = host;
@@ -920,7 +924,10 @@ static void zero_native_connect_webview_signals(zero_native_gtk_window_t *win, W
 // ── System tray: StatusNotifierItem + com.canonical.dbusmenu over GDBus ──
 
 #define ZERO_NATIVE_TRAY_ITEM_SHOW 1
-#define ZERO_NATIVE_TRAY_ITEM_QUIT 2
+#define ZERO_NATIVE_TRAY_ITEM_MUTE 2
+#define ZERO_NATIVE_TRAY_ITEM_AUTOSTART 3
+#define ZERO_NATIVE_TRAY_ITEM_LOCK 4
+#define ZERO_NATIVE_TRAY_ITEM_QUIT 5
 
 static const char zero_native_sni_xml[] =
     "<node><interface name='org.kde.StatusNotifierItem'>"
@@ -1001,6 +1008,48 @@ static GVariant *zero_native_tray_icon_pixmap(const char *icon_path) {
     return g_variant_builder_end(&builder);
 }
 
+// ── Autostart (XDG ~/.config/autostart/<bundle>.desktop) ──
+
+static char *zero_native_autostart_path(zero_native_gtk_host_t *host) {
+    char *name = g_strconcat(host->bundle_id ? host->bundle_id : "zero-native", ".desktop", NULL);
+    char *path = g_build_filename(g_get_user_config_dir(), "autostart", name, NULL);
+    g_free(name);
+    return path;
+}
+
+static int zero_native_autostart_enabled(zero_native_gtk_host_t *host) {
+    char *path = zero_native_autostart_path(host);
+    int exists = g_file_test(path, G_FILE_TEST_EXISTS);
+    g_free(path);
+    return exists;
+}
+
+static void zero_native_set_autostart(zero_native_gtk_host_t *host, int enable) {
+    char *path = zero_native_autostart_path(host);
+    if (enable) {
+        char *dir = g_path_get_dirname(path);
+        g_mkdir_with_parents(dir, 0700);
+        g_free(dir);
+        char exe[4096];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n > 0) {
+            exe[n] = '\0';
+        } else {
+            g_strlcpy(exe, host->app_name ? host->app_name : "zero-native", sizeof(exe));
+        }
+        char *contents = g_strdup_printf(
+            "[Desktop Entry]\nType=Application\nName=%s\nExec=%s\nIcon=%s\nX-GNOME-Autostart-enabled=true\nTerminal=false\n",
+            host->app_name ? host->app_name : "ZeroWhats",
+            exe,
+            host->bundle_id ? host->bundle_id : "zero-native");
+        g_file_set_contents(path, contents, -1, NULL);
+        g_free(contents);
+    } else {
+        g_remove(path);
+    }
+    g_free(path);
+}
+
 static void zero_native_tray_toggle_window(zero_native_gtk_host_t *host) {
     zero_native_gtk_window_t *win = zero_native_find_window(host, 1);
     if (!win || !win->gtk_window) return;
@@ -1012,20 +1061,51 @@ static void zero_native_tray_toggle_window(zero_native_gtk_host_t *host) {
     }
 }
 
+static void zero_native_tray_menu_changed(zero_native_gtk_host_t *host) {
+    if (!host->bus) return;
+    g_dbus_connection_emit_signal(host->bus, NULL, "/MenuBar", "com.canonical.dbusmenu",
+        "LayoutUpdated", g_variant_new("(ui)", 2u, 0), NULL);
+}
+
 static void zero_native_tray_invoke(zero_native_gtk_host_t *host, guint32 item_id) {
-    if (item_id == ZERO_NATIVE_TRAY_ITEM_QUIT) {
-        g_application_quit(G_APPLICATION(host->app));
-    } else {
-        zero_native_tray_toggle_window(host);
+    switch (item_id) {
+        case ZERO_NATIVE_TRAY_ITEM_QUIT:
+            g_application_quit(G_APPLICATION(host->app));
+            break;
+        case ZERO_NATIVE_TRAY_ITEM_MUTE:
+            host->muted = !host->muted;
+            zero_native_tray_menu_changed(host);
+            break;
+        case ZERO_NATIVE_TRAY_ITEM_AUTOSTART:
+            zero_native_set_autostart(host, !zero_native_autostart_enabled(host));
+            zero_native_tray_menu_changed(host);
+            break;
+        case ZERO_NATIVE_TRAY_ITEM_LOCK: {
+            static const char ev[] = "app:lock";
+            zero_native_gtk_emit_window_event(host, 1, ev, sizeof(ev) - 1, "{}", 2);
+            break;
+        }
+        case ZERO_NATIVE_TRAY_ITEM_SHOW:
+        default:
+            zero_native_tray_toggle_window(host);
+            break;
     }
 }
 
-static GVariant *zero_native_menu_item_node(int id, const char *label) {
+static GVariant *zero_native_menu_item_node(int id, const char *label, int checkable, int checked, int separator) {
     GVariantBuilder props;
     g_variant_builder_init(&props, G_VARIANT_TYPE("a{sv}"));
-    g_variant_builder_add(&props, "{sv}", "label", g_variant_new_string(label));
-    g_variant_builder_add(&props, "{sv}", "enabled", g_variant_new_boolean(TRUE));
-    g_variant_builder_add(&props, "{sv}", "visible", g_variant_new_boolean(TRUE));
+    if (separator) {
+        g_variant_builder_add(&props, "{sv}", "type", g_variant_new_string("separator"));
+    } else {
+        g_variant_builder_add(&props, "{sv}", "label", g_variant_new_string(label));
+        g_variant_builder_add(&props, "{sv}", "enabled", g_variant_new_boolean(TRUE));
+        g_variant_builder_add(&props, "{sv}", "visible", g_variant_new_boolean(TRUE));
+        if (checkable) {
+            g_variant_builder_add(&props, "{sv}", "toggle-type", g_variant_new_string("checkmark"));
+            g_variant_builder_add(&props, "{sv}", "toggle-state", g_variant_new_int32(checked ? 1 : 0));
+        }
+    }
     GVariantBuilder children;
     g_variant_builder_init(&children, G_VARIANT_TYPE("av"));
     return g_variant_new("(i@a{sv}@av)", id, g_variant_builder_end(&props), g_variant_builder_end(&children));
@@ -1074,8 +1154,12 @@ static void zero_native_dbusmenu_method(GDBusConnection *conn, const char *sende
         g_variant_builder_add(&root_props, "{sv}", "children-display", g_variant_new_string("submenu"));
         GVariantBuilder children;
         g_variant_builder_init(&children, G_VARIANT_TYPE("av"));
-        g_variant_builder_add(&children, "v", zero_native_menu_item_node(ZERO_NATIVE_TRAY_ITEM_SHOW, "Show / Hide ZeroWhats"));
-        g_variant_builder_add(&children, "v", zero_native_menu_item_node(ZERO_NATIVE_TRAY_ITEM_QUIT, "Quit"));
+        g_variant_builder_add(&children, "v", zero_native_menu_item_node(ZERO_NATIVE_TRAY_ITEM_SHOW, "Show / Hide ZeroWhats", 0, 0, 0));
+        g_variant_builder_add(&children, "v", zero_native_menu_item_node(ZERO_NATIVE_TRAY_ITEM_MUTE, "Mute notifications", 1, host->muted, 0));
+        g_variant_builder_add(&children, "v", zero_native_menu_item_node(ZERO_NATIVE_TRAY_ITEM_AUTOSTART, "Start on boot", 1, zero_native_autostart_enabled(host), 0));
+        g_variant_builder_add(&children, "v", zero_native_menu_item_node(ZERO_NATIVE_TRAY_ITEM_LOCK, "Lock now", 0, 0, 0));
+        g_variant_builder_add(&children, "v", zero_native_menu_item_node(0, "", 0, 0, 1));
+        g_variant_builder_add(&children, "v", zero_native_menu_item_node(ZERO_NATIVE_TRAY_ITEM_QUIT, "Quit", 0, 0, 0));
         GVariant *root = g_variant_new("(i@a{sv}@av)", 0, g_variant_builder_end(&root_props), g_variant_builder_end(&children));
         g_dbus_method_invocation_return_value(invocation, g_variant_new("(u@(ia{sv}av))", 1u, root));
         return;
@@ -1204,6 +1288,7 @@ static void zero_native_apply_webview_settings(zero_native_gtk_host_t *host, Web
     webkit_settings_set_enable_mediasource(settings, TRUE);
     webkit_settings_set_enable_webrtc(settings, TRUE);
     webkit_settings_set_javascript_can_access_clipboard(settings, TRUE);
+    webkit_settings_set_enable_page_cache(settings, TRUE);
     // Opt-in JS console -> stdout for debugging (ZERO_NATIVE_DEBUG_CONSOLE=1).
     if (g_getenv("ZERO_NATIVE_DEBUG_CONSOLE")) {
         webkit_settings_set_enable_write_console_messages_to_stdout(settings, TRUE);
@@ -1297,7 +1382,10 @@ static void on_activate(GtkApplication *app, gpointer data) {
     zero_native_emit_resize(host, win);
     zero_native_emit_window_frame(host, win, 1);
 
-    host->frame_timer = g_timeout_add(16, zero_native_frame_tick, host);
+    // The runtime only acts on a frame when state is invalidated (user driven),
+    // and WebKit repaints the content itself, so a low-frequency tick keeps idle
+    // CPU/power minimal without affecting responsiveness.
+    host->frame_timer = g_timeout_add(100, zero_native_frame_tick, host);
 }
 
 zero_native_gtk_host_t *zero_native_gtk_create(
