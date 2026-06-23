@@ -182,6 +182,25 @@ static int zero_native_webview_coord(double value) {
     return value > 0 ? (int)(value + 0.5) : 0;
 }
 
+// Hard cap on any requested surface dimension. A web view's size-request is its
+// minimum size, which can grow the toplevel; if a resize feedback loop ever
+// inflates it, an enormous WebKit/GPU surface is allocated and can exhaust GPU
+// memory (fatal on some hybrid/NVIDIA Wayland setups). Clamp to the window's
+// current size and an absolute ceiling so a surface can never balloon.
+#define ZERO_NATIVE_MAX_WEBVIEW_EXTENT 8192
+
+static void zero_native_clamp_extent(GtkWidget *widget, int *w, int *h) {
+    if (*w > ZERO_NATIVE_MAX_WEBVIEW_EXTENT) *w = ZERO_NATIVE_MAX_WEBVIEW_EXTENT;
+    if (*h > ZERO_NATIVE_MAX_WEBVIEW_EXTENT) *h = ZERO_NATIVE_MAX_WEBVIEW_EXTENT;
+    GtkRoot *root = gtk_widget_get_root(widget);
+    if (root && GTK_IS_WINDOW(root)) {
+        int ww = gtk_widget_get_width(GTK_WIDGET(root));
+        int wh = gtk_widget_get_height(GTK_WIDGET(root));
+        if (ww > 0 && *w > ww) *w = ww;
+        if (wh > 0 && *h > wh) *h = wh;
+    }
+}
+
 static void zero_native_apply_webview_frame(zero_native_gtk_webview_t *webview) {
     if (!webview || !webview->web_view) return;
     GtkWidget *widget = GTK_WIDGET(webview->web_view);
@@ -189,7 +208,10 @@ static void zero_native_apply_webview_frame(zero_native_gtk_webview_t *webview) 
     gtk_widget_set_valign(widget, GTK_ALIGN_START);
     gtk_widget_set_margin_start(widget, zero_native_webview_coord(webview->x));
     gtk_widget_set_margin_top(widget, zero_native_webview_coord(webview->y));
-    gtk_widget_set_size_request(widget, zero_native_webview_extent(webview->width), zero_native_webview_extent(webview->height));
+    int req_w = zero_native_webview_extent(webview->width);
+    int req_h = zero_native_webview_extent(webview->height);
+    zero_native_clamp_extent(widget, &req_w, &req_h);
+    gtk_widget_set_size_request(widget, req_w, req_h);
 }
 
 static void zero_native_reorder_webviews(zero_native_gtk_window_t *win) {
@@ -1383,7 +1405,16 @@ static zero_native_gtk_window_t *zero_native_create_window_internal(zero_native_
     zero_native_setup_bridge(win);
 
     win->stack_root = gtk_overlay_new();
-    gtk_overlay_set_child(GTK_OVERLAY(win->stack_root), GTK_WIDGET(wv));
+    // Zero-size base child so the toplevel size is driven by the window/compositor
+    // only. The chrome web view is an *overlay* child marked non-measured, so its
+    // (potentially large) min content size can never inflate the window — which
+    // previously caused a resize feedback loop and GPU-memory exhaustion.
+    GtkWidget *base = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_overlay_set_child(GTK_OVERLAY(win->stack_root), base);
+    gtk_widget_set_halign(GTK_WIDGET(wv), GTK_ALIGN_FILL);
+    gtk_widget_set_valign(GTK_WIDGET(wv), GTK_ALIGN_FILL);
+    gtk_overlay_add_overlay(GTK_OVERLAY(win->stack_root), GTK_WIDGET(wv));
+    gtk_overlay_set_measure_overlay(GTK_OVERLAY(win->stack_root), GTK_WIDGET(wv), FALSE);
     gtk_window_set_child(win->gtk_window, win->stack_root);
 
     g_signal_connect(win->gtk_window, "notify::default-width", G_CALLBACK(on_resize), win);
@@ -1808,7 +1839,10 @@ int zero_native_gtk_set_webview_frame(zero_native_gtk_host_t *host, uint64_t win
         gtk_widget_set_valign(widget, GTK_ALIGN_START);
         gtk_widget_set_margin_start(widget, zero_native_webview_coord(x));
         gtk_widget_set_margin_top(widget, zero_native_webview_coord(y));
-        gtk_widget_set_size_request(widget, zero_native_webview_extent(width), zero_native_webview_extent(height));
+        int req_w = zero_native_webview_extent(width);
+        int req_h = zero_native_webview_extent(height);
+        zero_native_clamp_extent(widget, &req_w, &req_h);
+        gtk_widget_set_size_request(widget, req_w, req_h);
         free(label_copy);
         return 1;
     }
