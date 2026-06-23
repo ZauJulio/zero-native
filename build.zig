@@ -538,7 +538,12 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 }
 
 fn testArtifact(b: *std.Build, mod: *std.Build.Module) *std.Build.Step.Compile {
-    return b.addTest(.{ .root_module = mod });
+    const t = b.addTest(.{ .root_module = mod });
+    // Host-compat: the LLVM backend + LLD link cleanly against recent
+    // glibc/binutils crt objects (SFrame), unlike the self-hosted linker.
+    t.use_llvm = true;
+    t.use_lld = true;
+    return t;
 }
 
 fn addTestStep(b: *std.Build, name: []const u8, description: []const u8, artifact: *std.Build.Step.Compile) void {

@@ -86,6 +86,9 @@ pub const WindowOptions = struct {
     resizable: bool = true,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
+    // When false the window is created without server-side decorations so the
+    // app can draw its own client-side title bar.
+    decorated: bool = true,
 
     pub fn resolvedTitle(self: WindowOptions, app_name: []const u8) []const u8 {
         return if (self.title.len > 0) self.title else app_name;
@@ -134,6 +137,7 @@ pub const WindowCreateOptions = struct {
     resizable: bool = true,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
+    decorated: bool = true,
     source: ?WebViewSource = null,
 
     pub fn windowOptions(self: WindowCreateOptions, id: WindowId, label: []const u8) WindowOptions {
@@ -145,6 +149,7 @@ pub const WindowCreateOptions = struct {
             .resizable = self.resizable,
             .restore_state = self.restore_state,
             .restore_policy = self.restore_policy,
+            .decorated = self.decorated,
         };
     }
 };
@@ -322,6 +327,11 @@ pub const PlatformServices = struct {
     create_window_fn: ?*const fn (context: ?*anyopaque, options: WindowOptions) anyerror!WindowInfo = null,
     focus_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     close_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    set_window_decorated_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, decorated: bool) anyerror!void = null,
+    minimize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    toggle_maximize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    start_window_drag_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    start_window_resize_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, edge: i32) anyerror!void = null,
     create_webview_fn: ?*const fn (context: ?*anyopaque, options: WebViewOptions) anyerror!void = null,
     set_webview_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, frame: geometry.RectF) anyerror!void = null,
     navigate_webview_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, url: []const u8) anyerror!void = null,
@@ -390,6 +400,31 @@ pub const PlatformServices = struct {
     pub fn closeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
         const close_fn = self.close_window_fn orelse return error.UnsupportedService;
         return close_fn(self.context, window_id);
+    }
+
+    pub fn setWindowDecorated(self: PlatformServices, window_id: WindowId, decorated: bool) anyerror!void {
+        const set_fn = self.set_window_decorated_fn orelse return error.UnsupportedService;
+        return set_fn(self.context, window_id, decorated);
+    }
+
+    pub fn minimizeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
+        const minimize_fn = self.minimize_window_fn orelse return error.UnsupportedService;
+        return minimize_fn(self.context, window_id);
+    }
+
+    pub fn toggleMaximizeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
+        const toggle_fn = self.toggle_maximize_window_fn orelse return error.UnsupportedService;
+        return toggle_fn(self.context, window_id);
+    }
+
+    pub fn startWindowDrag(self: PlatformServices, window_id: WindowId) anyerror!void {
+        const drag_fn = self.start_window_drag_fn orelse return error.UnsupportedService;
+        return drag_fn(self.context, window_id);
+    }
+
+    pub fn startWindowResize(self: PlatformServices, window_id: WindowId, edge: i32) anyerror!void {
+        const resize_fn = self.start_window_resize_fn orelse return error.UnsupportedService;
+        return resize_fn(self.context, window_id, edge);
     }
 
     pub fn createWebView(self: PlatformServices, options: WebViewOptions) anyerror!void {
@@ -481,7 +516,7 @@ pub const Platform = struct {
 };
 
 pub const Backend = enum {
-    @"null",
+    null,
     macos,
     linux,
     windows,
@@ -532,6 +567,11 @@ pub const NullPlatform = struct {
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
+                .set_window_decorated_fn = setWindowDecorated,
+                .minimize_window_fn = minimizeWindow,
+                .toggle_maximize_window_fn = toggleMaximizeWindow,
+                .start_window_drag_fn = startWindowDrag,
+                .start_window_resize_fn = startWindowResize,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -658,6 +698,33 @@ pub const NullPlatform = struct {
         self.windows[index].open = false;
         self.windows[index].focused = false;
         self.removeWebViewsForWindow(window_id);
+    }
+
+    fn setWindowDecorated(context: ?*anyopaque, window_id: WindowId, decorated: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        _ = decorated;
+        _ = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+    }
+
+    fn minimizeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        _ = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+    }
+
+    fn toggleMaximizeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        _ = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+    }
+
+    fn startWindowDrag(context: ?*anyopaque, window_id: WindowId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        _ = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+    }
+
+    fn startWindowResize(context: ?*anyopaque, window_id: WindowId, edge: i32) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        _ = edge;
+        _ = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
     }
 
     fn createWebView(context: ?*anyopaque, options: WebViewOptions) anyerror!void {

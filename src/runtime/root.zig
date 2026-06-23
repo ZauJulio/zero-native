@@ -602,7 +602,7 @@ pub const Runtime = struct {
             return true;
         }
         const result = if (is_window)
-            self.dispatchWindowBridgeCommand(request, &result_buffer, &response_buffer)
+            self.dispatchWindowBridgeCommand(request, message.window_id, &result_buffer, &response_buffer)
         else if (is_webview)
             self.dispatchWebViewBridgeCommand(request, message.window_id, &result_buffer, &response_buffer)
         else
@@ -630,7 +630,7 @@ pub const Runtime = struct {
         return security.hasPermission(self.options.security.permissions, security.permission_window);
     }
 
-    fn dispatchWindowBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+    fn dispatchWindowBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
         const result = if (std.mem.eql(u8, request.command, "zero-native.window.list"))
             self.writeWindowListJson(result_buffer) catch return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, "Failed to list windows")
         else if (std.mem.eql(u8, request.command, "zero-native.window.create"))
@@ -639,9 +639,60 @@ pub const Runtime = struct {
             self.focusWindowFromJson(request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
         else if (std.mem.eql(u8, request.command, "zero-native.window.close"))
             self.closeWindowFromJson(request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.window.minimize"))
+            self.windowControlFromJson(request.payload, source_window_id, result_buffer, .minimize) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.window.toggleMaximize"))
+            self.windowControlFromJson(request.payload, source_window_id, result_buffer, .toggle_maximize) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.window.setDecorated"))
+            self.setDecoratedFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.window.startDrag"))
+            self.windowControlFromJson(request.payload, source_window_id, result_buffer, .start_drag) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
+        else if (std.mem.eql(u8, request.command, "zero-native.window.startResize"))
+            self.startResizeFromJson(request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, builtinBridgeErrorMessage(err))
         else
             return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, "Unknown window command");
         return bridge.writeSuccessResponse(response_buffer, request.id, result);
+    }
+
+    const WindowControl = enum { minimize, toggle_maximize, start_drag };
+
+    fn resolveWindowSelectorOrDefault(self: *Runtime, payload: []const u8, storage: *json.StringStorage, default_id: platform.WindowId) !platform.WindowId {
+        if (jsonIntegerField(payload, "id")) |id| return id;
+        if (jsonStringField(payload, "label", storage)) |label| {
+            const index = self.findWindowIndexByLabel(label) orelse return error.WindowNotFound;
+            return self.windows[index].info.id;
+        }
+        return default_id;
+    }
+
+    fn windowControlFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8, control: WindowControl) ![]const u8 {
+        var storage = json.StringStorage.init(output);
+        const window_id = try self.resolveWindowSelectorOrDefault(payload, &storage, source_window_id);
+        switch (control) {
+            .minimize => try self.options.platform.services.minimizeWindow(window_id),
+            .toggle_maximize => try self.options.platform.services.toggleMaximizeWindow(window_id),
+            .start_drag => try self.options.platform.services.startWindowDrag(window_id),
+        }
+        const index = self.findWindowIndexById(window_id) orelse return error.WindowNotFound;
+        return writeWindowJson(self.windows[index].info, output);
+    }
+
+    fn setDecoratedFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
+        var storage = json.StringStorage.init(output);
+        const window_id = try self.resolveWindowSelectorOrDefault(payload, &storage, source_window_id);
+        const decorated = jsonBoolField(payload, "decorated") orelse true;
+        try self.options.platform.services.setWindowDecorated(window_id, decorated);
+        const index = self.findWindowIndexById(window_id) orelse return error.WindowNotFound;
+        return writeWindowJson(self.windows[index].info, output);
+    }
+
+    fn startResizeFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
+        var storage = json.StringStorage.init(output);
+        const window_id = try self.resolveWindowSelectorOrDefault(payload, &storage, source_window_id);
+        const edge_label = jsonStringField(payload, "edge", &storage) orelse "south-east";
+        try self.options.platform.services.startWindowResize(window_id, surfaceEdgeFromLabel(edge_label));
+        const index = self.findWindowIndexById(window_id) orelse return error.WindowNotFound;
+        return writeWindowJson(self.windows[index].info, output);
     }
 
     fn dispatchWebViewBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
@@ -1169,6 +1220,24 @@ fn writeWindowJson(window: platform.WindowInfo, output: []u8) ![]const u8 {
     return writer.buffered();
 }
 
+// Maps a resize-edge label to a GdkSurfaceEdge integer (north-west=0 .. south-east=7).
+fn surfaceEdgeFromLabel(label: []const u8) i32 {
+    const edges = [_]struct { name: []const u8, value: i32 }{
+        .{ .name = "north-west", .value = 0 },
+        .{ .name = "north", .value = 1 },
+        .{ .name = "north-east", .value = 2 },
+        .{ .name = "west", .value = 3 },
+        .{ .name = "east", .value = 4 },
+        .{ .name = "south-west", .value = 5 },
+        .{ .name = "south", .value = 6 },
+        .{ .name = "south-east", .value = 7 },
+    };
+    for (edges) |edge| {
+        if (std.mem.eql(u8, label, edge.name)) return edge.value;
+    }
+    return 7; // default: south-east
+}
+
 fn writeWebViewOkJson(label: []const u8, window_id: platform.WindowId, output: []u8) ![]const u8 {
     var writer = std.Io.Writer.fixed(output);
     try writer.writeAll("{\"label\":");
@@ -1668,6 +1737,39 @@ test "runtime handles built-in JavaScript window bridge commands" {
         .window_id = 1,
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"open\":false") != null);
+}
+
+test "runtime handles window control bridge commands (minimize/maximize/drag/resize/decorated)" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "window-controls", .source = platform.WebViewSource.html("<p>Controls</p>") };
+        }
+    };
+
+    var harness: TestHarness() = undefined;
+    harness.init(.{});
+    harness.runtime.options.js_window_api = true;
+    const origins = [_][]const u8{"zero://inline"};
+    harness.runtime.options.security.navigation.allowed_origins = &origins;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    // No selector in the payload: defaults to the source window (id 1).
+    const commands = [_][]const u8{
+        "{\"id\":\"1\",\"command\":\"zero-native.window.minimize\",\"payload\":{}}",
+        "{\"id\":\"2\",\"command\":\"zero-native.window.toggleMaximize\",\"payload\":{}}",
+        "{\"id\":\"3\",\"command\":\"zero-native.window.startDrag\",\"payload\":{}}",
+        "{\"id\":\"4\",\"command\":\"zero-native.window.startResize\",\"payload\":{\"edge\":\"south-east\"}}",
+        "{\"id\":\"5\",\"command\":\"zero-native.window.setDecorated\",\"payload\":{\"decorated\":false}}",
+    };
+    for (commands) |bytes| {
+        try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+            .bytes = bytes,
+            .origin = "zero://inline",
+            .window_id = 1,
+        } });
+        try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
+    }
 }
 
 test "runtime handles built-in JavaScript webview bridge commands" {

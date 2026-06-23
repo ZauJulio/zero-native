@@ -51,6 +51,7 @@ struct zero_native_gtk_host {
     char *window_label;
     double init_x, init_y, init_width, init_height;
     int restore_frame;
+    int decorated;
 
     zero_native_gtk_event_callback_t callback;
     void *callback_context;
@@ -304,7 +305,12 @@ static const char *zero_native_bridge_script(void) {
         "create:function(options){return invoke('zero-native.window.create',options||{});},"
         "list:function(){return invoke('zero-native.window.list',{});},"
         "focus:function(value){return invoke('zero-native.window.focus',selector(value));},"
-        "close:function(value){return invoke('zero-native.window.close',selector(value));}"
+        "close:function(value){return invoke('zero-native.window.close',value==null?{}:selector(value));},"
+        "minimize:function(value){return invoke('zero-native.window.minimize',value==null?{}:selector(value));},"
+        "toggleMaximize:function(value){return invoke('zero-native.window.toggleMaximize',value==null?{}:selector(value));},"
+        "setDecorated:function(decorated,value){var p=value==null?{}:selector(value);p.decorated=!!decorated;return invoke('zero-native.window.setDecorated',p);},"
+        "startDrag:function(value){return invoke('zero-native.window.startDrag',value==null?{}:selector(value));},"
+        "startResize:function(edge,value){var p=value==null?{}:selector(value);p.edge=String(edge);return invoke('zero-native.window.startResize',p);}"
         "});"
         "var dialogs=Object.freeze({"
         "openFile:function(options){return invoke('zero-native.dialog.openFile',options||{});},"
@@ -658,7 +664,7 @@ static void zero_native_setup_bridge(zero_native_gtk_window_t *win) {
     webkit_user_script_unref(script);
 }
 
-static zero_native_gtk_window_t *zero_native_create_window_internal(zero_native_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame) {
+static zero_native_gtk_window_t *zero_native_create_window_internal(zero_native_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int decorated) {
     if (zero_native_find_window(host, window_id)) return NULL;
 
     int slot = -1;
@@ -691,6 +697,8 @@ static zero_native_gtk_window_t *zero_native_create_window_internal(zero_native_
     win->gtk_window = GTK_WINDOW(gtk_application_window_new(host->app));
     gtk_window_set_title(win->gtk_window, win->title);
     gtk_window_set_default_size(win->gtk_window, (int)width, (int)height);
+    // ZeroWhats: frameless windows for custom client-side title bars.
+    gtk_window_set_decorated(win->gtk_window, decorated ? TRUE : FALSE);
 
     win->content_manager = webkit_user_content_manager_new();
     WebKitWebView *wv = WEBKIT_WEB_VIEW(
@@ -726,7 +734,7 @@ static void on_activate(GtkApplication *app, gpointer data) {
         host->init_x, host->init_y,
         host->init_width > 0 ? host->init_width : 720,
         host->init_height > 0 ? host->init_height : 480,
-        host->restore_frame);
+        host->restore_frame, host->decorated);
     if (!win) return;
 
     gtk_window_present(win->gtk_window);
@@ -745,7 +753,7 @@ zero_native_gtk_host_t *zero_native_gtk_create(
     const char *icon_path, size_t icon_path_len,
     const char *window_label, size_t window_label_len,
     double x, double y, double width, double height,
-    int restore_frame)
+    int restore_frame, int decorated)
 {
     zero_native_gtk_host_t *host = calloc(1, sizeof(zero_native_gtk_host_t));
     if (!host) return NULL;
@@ -935,10 +943,10 @@ void zero_native_gtk_set_security_policy(zero_native_gtk_host_t *host, const cha
     host->external_link_action = external_action;
 }
 
-int zero_native_gtk_create_window(zero_native_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame) {
+int zero_native_gtk_create_window(zero_native_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int decorated) {
     char *title = window_title_len > 0 ? zero_native_strndup(window_title, window_title_len) : NULL;
     char *label = window_label_len > 0 ? zero_native_strndup(window_label, window_label_len) : NULL;
-    zero_native_gtk_window_t *win = zero_native_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame);
+    zero_native_gtk_window_t *win = zero_native_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame, decorated);
     free(title);
     free(label);
     if (!win) return 0;
@@ -960,6 +968,62 @@ int zero_native_gtk_close_window(zero_native_gtk_host_t *host, uint64_t window_i
     if (!win || !win->gtk_window) return 0;
     gtk_window_close(win->gtk_window);
     return 1;
+}
+
+int zero_native_gtk_set_window_decorated(zero_native_gtk_host_t *host, uint64_t window_id, int decorated) {
+    zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
+    if (!win || !win->gtk_window) return 0;
+    gtk_window_set_decorated(win->gtk_window, decorated ? TRUE : FALSE);
+    return 1;
+}
+
+int zero_native_gtk_minimize_window(zero_native_gtk_host_t *host, uint64_t window_id) {
+    zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
+    if (!win || !win->gtk_window) return 0;
+    gtk_window_minimize(win->gtk_window);
+    return 1;
+}
+
+int zero_native_gtk_toggle_maximize_window(zero_native_gtk_host_t *host, uint64_t window_id) {
+    zero_native_gtk_window_t *win = zero_native_find_window(host, window_id);
+    if (!win || !win->gtk_window) return 0;
+    if (gtk_window_is_maximized(win->gtk_window)) {
+        gtk_window_unmaximize(win->gtk_window);
+    } else {
+        gtk_window_maximize(win->gtk_window);
+    }
+    return 1;
+}
+
+// Hand the active pointer grab to the compositor for an interactive move/resize.
+// `resize` selects begin_resize; `edge` is a GdkSurfaceEdge value (ignored for move).
+static int zero_native_begin_window_drag(zero_native_gtk_window_t *win, int resize, int edge) {
+    if (!win || !win->gtk_window) return 0;
+    GtkNative *native = GTK_NATIVE(win->gtk_window);
+    if (!native) return 0;
+    GdkSurface *surface = gtk_native_get_surface(native);
+    if (!surface || !GDK_IS_TOPLEVEL(surface)) return 0;
+    GdkDisplay *display = gtk_widget_get_display(GTK_WIDGET(win->gtk_window));
+    GdkSeat *seat = gdk_display_get_default_seat(display);
+    GdkDevice *device = seat ? gdk_seat_get_pointer(seat) : NULL;
+    if (!device) return 0;
+    double x = 0, y = 0;
+    GdkModifierType mask = 0;
+    gdk_surface_get_device_position(surface, device, &x, &y, &mask);
+    if (resize) {
+        gdk_toplevel_begin_resize(GDK_TOPLEVEL(surface), (GdkSurfaceEdge)edge, device, GDK_BUTTON_PRIMARY, x, y, GDK_CURRENT_TIME);
+    } else {
+        gdk_toplevel_begin_move(GDK_TOPLEVEL(surface), device, GDK_BUTTON_PRIMARY, x, y, GDK_CURRENT_TIME);
+    }
+    return 1;
+}
+
+int zero_native_gtk_start_window_drag(zero_native_gtk_host_t *host, uint64_t window_id) {
+    return zero_native_begin_window_drag(zero_native_find_window(host, window_id), 0, 0);
+}
+
+int zero_native_gtk_start_window_resize(zero_native_gtk_host_t *host, uint64_t window_id, int edge) {
+    return zero_native_begin_window_drag(zero_native_find_window(host, window_id), 1, edge);
 }
 
 int zero_native_gtk_create_webview(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {

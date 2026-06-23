@@ -40,7 +40,7 @@ const GtkEvent = extern struct {
 const GtkCallback = *const fn (context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void;
 const GtkBridgeCallback = *const fn (context: ?*anyopaque, window_id: u64, webview_label: [*]const u8, webview_label_len: usize, message: [*]const u8, message_len: usize, origin: [*]const u8, origin_len: usize) callconv(.c) void;
 
-extern fn zero_native_gtk_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int) ?*GtkHost;
+extern fn zero_native_gtk_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, decorated: c_int) ?*GtkHost;
 extern fn zero_native_gtk_destroy(host: *GtkHost) void;
 extern fn zero_native_gtk_run(host: *GtkHost, callback: GtkCallback, context: ?*anyopaque) void;
 extern fn zero_native_gtk_stop(host: *GtkHost) void;
@@ -52,9 +52,14 @@ extern fn zero_native_gtk_bridge_respond_window(host: *GtkHost, window_id: u64, 
 extern fn zero_native_gtk_bridge_respond_webview(host: *GtkHost, window_id: u64, webview_label: [*]const u8, webview_label_len: usize, response: [*]const u8, response_len: usize) void;
 extern fn zero_native_gtk_emit_window_event(host: *GtkHost, window_id: u64, name: [*]const u8, name_len: usize, detail_json: [*]const u8, detail_json_len: usize) void;
 extern fn zero_native_gtk_set_security_policy(host: *GtkHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
-extern fn zero_native_gtk_create_window(host: *GtkHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int) c_int;
+extern fn zero_native_gtk_create_window(host: *GtkHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, decorated: c_int) c_int;
 extern fn zero_native_gtk_focus_window(host: *GtkHost, window_id: u64) c_int;
 extern fn zero_native_gtk_close_window(host: *GtkHost, window_id: u64) c_int;
+extern fn zero_native_gtk_set_window_decorated(host: *GtkHost, window_id: u64, decorated: c_int) c_int;
+extern fn zero_native_gtk_minimize_window(host: *GtkHost, window_id: u64) c_int;
+extern fn zero_native_gtk_toggle_maximize_window(host: *GtkHost, window_id: u64) c_int;
+extern fn zero_native_gtk_start_window_drag(host: *GtkHost, window_id: u64) c_int;
+extern fn zero_native_gtk_start_window_resize(host: *GtkHost, window_id: u64, edge: c_int) c_int;
 extern fn zero_native_gtk_create_webview(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn zero_native_gtk_set_webview_frame(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn zero_native_gtk_navigate_webview(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize) c_int;
@@ -130,7 +135,7 @@ pub const LinuxPlatform = struct {
         const window_options = app_info.resolvedMainWindow();
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
-        const host = zero_native_gtk_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0) orelse return error.CreateFailed;
+        const host = zero_native_gtk_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.decorated) 1 else 0) orelse return error.CreateFailed;
         return .{
             .host = host,
             .web_engine = web_engine,
@@ -165,6 +170,11 @@ pub const LinuxPlatform = struct {
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
+                .set_window_decorated_fn = setWindowDecorated,
+                .minimize_window_fn = minimizeWindow,
+                .toggle_maximize_window_fn = toggleMaximizeWindow,
+                .start_window_drag_fn = startWindowDrag,
+                .start_window_resize_fn = startWindowResize,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -328,7 +338,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (zero_native_gtk_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0) == 0) return error.CreateFailed;
+    if (zero_native_gtk_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.decorated) 1 else 0) == 0) return error.CreateFailed;
     return .{
         .id = options.id,
         .label = options.label,
@@ -348,6 +358,31 @@ fn focusWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (zero_native_gtk_close_window(self.host, window_id) == 0) return error.CloseFailed;
+}
+
+fn setWindowDecorated(context: ?*anyopaque, window_id: platform_mod.WindowId, decorated: bool) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (zero_native_gtk_set_window_decorated(self.host, window_id, if (decorated) 1 else 0) == 0) return error.WindowNotFound;
+}
+
+fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (zero_native_gtk_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn toggleMaximizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (zero_native_gtk_toggle_maximize_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn startWindowDrag(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (zero_native_gtk_start_window_drag(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn startWindowResize(context: ?*anyopaque, window_id: platform_mod.WindowId, edge: i32) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (zero_native_gtk_start_window_resize(self.host, window_id, edge) == 0) return error.WindowNotFound;
 }
 
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {

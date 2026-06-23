@@ -80,7 +80,7 @@ typedef struct {
     size_t tertiary_button_len;
 } zero_native_gtk_message_dialog_opts_t;
 
-zero_native_gtk_host_t *zero_native_gtk_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame);
+zero_native_gtk_host_t *zero_native_gtk_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int decorated);
 void zero_native_gtk_destroy(zero_native_gtk_host_t *host);
 void zero_native_gtk_run(zero_native_gtk_host_t *host, zero_native_gtk_event_callback_t callback, void *context);
 void zero_native_gtk_stop(zero_native_gtk_host_t *host);
@@ -92,9 +92,14 @@ void zero_native_gtk_bridge_respond_window(zero_native_gtk_host_t *host, uint64_
 void zero_native_gtk_bridge_respond_webview(zero_native_gtk_host_t *host, uint64_t window_id, const char *webview_label, size_t webview_label_len, const char *response, size_t response_len);
 void zero_native_gtk_emit_window_event(zero_native_gtk_host_t *host, uint64_t window_id, const char *name, size_t name_len, const char *detail_json, size_t detail_json_len);
 void zero_native_gtk_set_security_policy(zero_native_gtk_host_t *host, const char *allowed_origins, size_t allowed_origins_len, const char *external_urls, size_t external_urls_len, int external_action);
-int zero_native_gtk_create_window(zero_native_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame);
+int zero_native_gtk_create_window(zero_native_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int decorated);
 int zero_native_gtk_focus_window(zero_native_gtk_host_t *host, uint64_t window_id);
 int zero_native_gtk_close_window(zero_native_gtk_host_t *host, uint64_t window_id);
+int zero_native_gtk_set_window_decorated(zero_native_gtk_host_t *host, uint64_t window_id, int decorated);
+int zero_native_gtk_minimize_window(zero_native_gtk_host_t *host, uint64_t window_id);
+int zero_native_gtk_toggle_maximize_window(zero_native_gtk_host_t *host, uint64_t window_id);
+int zero_native_gtk_start_window_drag(zero_native_gtk_host_t *host, uint64_t window_id);
+int zero_native_gtk_start_window_resize(zero_native_gtk_host_t *host, uint64_t window_id, int edge);
 int zero_native_gtk_create_webview(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled);
 int zero_native_gtk_set_webview_frame(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height);
 int zero_native_gtk_navigate_webview(zero_native_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len);
