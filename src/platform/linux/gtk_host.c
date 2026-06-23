@@ -978,33 +978,54 @@ static const char zero_native_dbusmenu_xml[] =
 static GDBusNodeInfo *zero_native_sni_node = NULL;
 static GDBusNodeInfo *zero_native_dbusmenu_node = NULL;
 
-// Build the IconPixmap variant a(iiay) from a PNG file (ARGB32, network order).
+// Build the IconPixmap variant a(iiay) (ARGB32, network order). This ALWAYS
+// returns a valid, non-empty pixmap: if the icon file cannot be loaded it falls
+// back to a solid square, because an empty/zero-size tray icon can wedge some
+// status-notifier hosts (e.g. the GNOME AppIndicator extension) into flooding
+// allocation assertions and hanging the shell.
 static GVariant *zero_native_tray_icon_pixmap(const char *icon_path) {
-    if (!icon_path || !icon_path[0]) return g_variant_new_array(G_VARIANT_TYPE("(iiay)"), NULL, 0);
-    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file_at_scale(icon_path, 32, 32, TRUE, NULL);
-    if (!pixbuf) return g_variant_new_array(G_VARIANT_TYPE("(iiay)"), NULL, 0);
-    int w = gdk_pixbuf_get_width(pixbuf);
-    int h = gdk_pixbuf_get_height(pixbuf);
-    int channels = gdk_pixbuf_get_n_channels(pixbuf);
-    int stride = gdk_pixbuf_get_rowstride(pixbuf);
-    const guchar *pixels = gdk_pixbuf_read_pixels(pixbuf);
-    gsize size = (gsize)w * h * 4;
-    guchar *argb = g_malloc(size);
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            const guchar *p = pixels + y * stride + x * channels;
-            guchar r = p[0], g = p[1], b = p[2];
-            guchar a = channels == 4 ? p[3] : 0xff;
-            guchar *o = argb + ((gsize)y * w + x) * 4;
-            o[0] = a; o[1] = r; o[2] = g; o[3] = b; // ARGB32, network byte order
+    int w = 24, h = 24;
+    guchar *argb = NULL;
+    GdkPixbuf *pixbuf = (icon_path && icon_path[0])
+        ? gdk_pixbuf_new_from_file_at_scale(icon_path, 24, 24, TRUE, NULL)
+        : NULL;
+    if (pixbuf) {
+        w = gdk_pixbuf_get_width(pixbuf);
+        h = gdk_pixbuf_get_height(pixbuf);
+        if (w < 1 || h < 1) {
+            g_object_unref(pixbuf);
+            pixbuf = NULL;
         }
     }
-    GVariant *bytes = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, argb, size, 1);
+    if (pixbuf) {
+        int channels = gdk_pixbuf_get_n_channels(pixbuf);
+        int stride = gdk_pixbuf_get_rowstride(pixbuf);
+        const guchar *pixels = gdk_pixbuf_read_pixels(pixbuf);
+        argb = g_malloc((gsize)w * h * 4);
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                const guchar *p = pixels + y * stride + x * channels;
+                guchar a = channels == 4 ? p[3] : 0xff;
+                guchar *o = argb + ((gsize)y * w + x) * 4;
+                o[0] = a; o[1] = p[0]; o[2] = p[1]; o[3] = p[2]; // ARGB, network order
+            }
+        }
+        g_object_unref(pixbuf);
+    } else {
+        // Fallback: solid WhatsApp-green square so the icon is never empty.
+        w = 24;
+        h = 24;
+        argb = g_malloc((gsize)w * h * 4);
+        for (gsize i = 0; i < (gsize)w * h; i++) {
+            guchar *o = argb + i * 4;
+            o[0] = 0xff; o[1] = 0x25; o[2] = 0xd3; o[3] = 0x66;
+        }
+    }
+    GVariant *bytes = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, argb, (gsize)w * h * 4, 1);
     GVariantBuilder builder;
     g_variant_builder_init(&builder, G_VARIANT_TYPE("a(iiay)"));
     g_variant_builder_add(&builder, "(ii@ay)", w, h, bytes);
     g_free(argb);
-    g_object_unref(pixbuf);
     return g_variant_builder_end(&builder);
 }
 
@@ -1236,14 +1257,24 @@ static void zero_native_tray_emit(zero_native_gtk_host_t *host, const char *sign
 // Public entry point: create the tray on first call, then update tooltip / attention.
 void zero_native_gtk_tray_set(zero_native_gtk_host_t *host, const char *tooltip, size_t tooltip_len, int attention) {
     if (!host) return;
+    int new_attention = attention ? 1 : 0;
+    const char *old_tooltip = host->tray_tooltip ? host->tray_tooltip : "";
+    int tooltip_changed = strncmp(old_tooltip, tooltip ? tooltip : "", tooltip_len) != 0 ||
+        strlen(old_tooltip) != tooltip_len;
+    int attention_changed = host->tray_attention != new_attention;
+
     free(host->tray_tooltip);
     host->tray_tooltip = tooltip_len > 0 ? zero_native_strndup(tooltip, tooltip_len) : NULL;
-    host->tray_attention = attention ? 1 : 0;
+    host->tray_attention = new_attention;
+
     if (!host->tray_active) {
         zero_native_tray_register(host);
         host->tray_active = 1;
-    } else {
-        zero_native_tray_emit(host, "NewToolTip");
+        return;
+    }
+    // Only signal the host when something actually changed, to avoid churn.
+    if (tooltip_changed) zero_native_tray_emit(host, "NewToolTip");
+    if (attention_changed) {
         g_dbus_connection_emit_signal(host->bus, NULL, "/StatusNotifierItem", "org.kde.StatusNotifierItem",
             "NewStatus", g_variant_new("(s)", host->tray_attention ? "NeedsAttention" : "Active"), NULL);
     }
