@@ -850,9 +850,55 @@ static gboolean on_permission_request(WebKitWebView *web_view, WebKitPermissionR
     return FALSE; // defer everything else to the default handler
 }
 
+static void zero_native_append_json_string(GString *out, const char *str) {
+    g_string_append_c(out, '"');
+    for (const char *p = str ? str : ""; *p; p++) {
+        switch (*p) {
+            case '"': g_string_append(out, "\\\""); break;
+            case '\\': g_string_append(out, "\\\\"); break;
+            case '\n': g_string_append(out, "\\n"); break;
+            case '\r': g_string_append(out, "\\r"); break;
+            case '\t': g_string_append(out, "\\t"); break;
+            default:
+                if ((unsigned char)*p < 0x20) {
+                    g_string_append_printf(out, "\\u%04x", (unsigned char)*p);
+                } else {
+                    g_string_append_c(out, *p);
+                }
+        }
+    }
+    g_string_append_c(out, '"');
+}
+
+// Relay a child web view's <title> changes to the chrome web view as a
+// "webview:title" event so the app can mirror unread counts, etc.
+static void on_child_title_changed(GObject *object, GParamSpec *pspec, gpointer data) {
+    (void)pspec;
+    WebKitWebView *wv = WEBKIT_WEB_VIEW(object);
+    zero_native_gtk_window_t *win = data;
+    const char *label = NULL;
+    for (int i = 0; i < win->webview_count; i++) {
+        if (win->webviews[i].web_view == wv) {
+            label = win->webviews[i].label;
+            break;
+        }
+    }
+    if (!label) return; // only relay child web views, not the chrome itself
+    const char *title = webkit_web_view_get_title(wv);
+    GString *detail = g_string_new("{\"label\":");
+    zero_native_append_json_string(detail, label);
+    g_string_append(detail, ",\"title\":");
+    zero_native_append_json_string(detail, title ? title : "");
+    g_string_append_c(detail, '}');
+    static const char event_name[] = "webview:title";
+    zero_native_gtk_emit_window_event(win->host, win->id, event_name, sizeof(event_name) - 1, detail->str, detail->len);
+    g_string_free(detail, TRUE);
+}
+
 static void zero_native_connect_webview_signals(zero_native_gtk_window_t *win, WebKitWebView *wv) {
     g_signal_connect(wv, "permission-request", G_CALLBACK(on_permission_request), win);
     g_signal_connect(wv, "show-notification", G_CALLBACK(on_show_notification), win);
+    g_signal_connect(wv, "notify::title", G_CALLBACK(on_child_title_changed), win);
 }
 
 // Lazily create the shared, persistent network session. Cookies and the rest
@@ -894,6 +940,10 @@ static void zero_native_apply_webview_settings(zero_native_gtk_host_t *host, Web
     webkit_settings_set_enable_mediasource(settings, TRUE);
     webkit_settings_set_enable_webrtc(settings, TRUE);
     webkit_settings_set_javascript_can_access_clipboard(settings, TRUE);
+    // Opt-in JS console -> stdout for debugging (ZERO_NATIVE_DEBUG_CONSOLE=1).
+    if (g_getenv("ZERO_NATIVE_DEBUG_CONSOLE")) {
+        webkit_settings_set_enable_write_console_messages_to_stdout(settings, TRUE);
+    }
 }
 
 static zero_native_gtk_window_t *zero_native_create_window_internal(zero_native_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int decorated) {
