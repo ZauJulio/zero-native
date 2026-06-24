@@ -206,6 +206,9 @@ static void zero_native_apply_webview_frame(zero_native_gtk_webview_t *webview) 
     GtkWidget *widget = GTK_WIDGET(webview->web_view);
     gtk_widget_set_halign(widget, GTK_ALIGN_START);
     gtk_widget_set_valign(widget, GTK_ALIGN_START);
+    // A web view expands to fill by default, which ignores an explicit frame.
+    gtk_widget_set_hexpand(widget, FALSE);
+    gtk_widget_set_vexpand(widget, FALSE);
     gtk_widget_set_margin_start(widget, zero_native_webview_coord(webview->x));
     gtk_widget_set_margin_top(widget, zero_native_webview_coord(webview->y));
     int req_w = zero_native_webview_extent(webview->width);
@@ -218,6 +221,14 @@ static void zero_native_reorder_webviews(zero_native_gtk_window_t *win) {
     if (!win || !win->stack_root) return;
     int placed[ZERO_NATIVE_MAX_WEBVIEWS] = {0};
     GtkWidget *previous = NULL;
+    // Keep the main (chrome) web view at the bottom of the overlay stack so
+    // dynamically created views (e.g. the WhatsApp content view) layer on top.
+    // Overlay children draw first-to-last; inserting the main view first
+    // (previous == NULL) puts it lowest, then each web view goes above it.
+    if (win->web_view) {
+        gtk_widget_insert_after(GTK_WIDGET(win->web_view), GTK_WIDGET(win->stack_root), NULL);
+        previous = GTK_WIDGET(win->web_view);
+    }
     for (int pass = 0; pass < win->webview_count; pass++) {
         int best = -1;
         for (int i = 0; i < win->webview_count; i++) {
@@ -927,6 +938,9 @@ static void on_child_title_changed(GObject *object, GParamSpec *pspec, gpointer 
     }
     if (!label) return; // only relay child web views, not the chrome itself
     const char *title = webkit_web_view_get_title(wv);
+    // Show the child's <title> (e.g. an unread count "(3) WhatsApp") in the
+    // native title bar / task switcher.
+    if (title && *title) gtk_window_set_title(win->gtk_window, title);
     GString *detail = g_string_new("{\"label\":");
     zero_native_append_json_string(detail, label);
     g_string_append(detail, ",\"title\":");
@@ -1381,8 +1395,15 @@ static zero_native_gtk_window_t *zero_native_create_window_internal(zero_native_
     win->gtk_window = GTK_WINDOW(gtk_application_window_new(host->app));
     gtk_window_set_title(win->gtk_window, win->title);
     gtk_window_set_default_size(win->gtk_window, (int)width, (int)height);
-    // ZeroWhats: frameless windows for custom client-side title bars.
     gtk_window_set_decorated(win->gtk_window, decorated ? TRUE : FALSE);
+    // A decorated GTK4 window on Wayland draws no title bar (and shows only the
+    // CSD resize shadow — a "giant white border") unless it is given a titlebar
+    // widget. Provide a native GtkHeaderBar so the window has a real title bar,
+    // working min/maximize, native edge-resize cursors and the window icon.
+    if (decorated) {
+        GtkWidget *header = gtk_header_bar_new();
+        gtk_window_set_titlebar(win->gtk_window, header);
+    }
 
     win->content_manager = webkit_user_content_manager_new();
     WebKitWebView *wv = WEBKIT_WEB_VIEW(
@@ -1837,6 +1858,8 @@ int zero_native_gtk_set_webview_frame(zero_native_gtk_host_t *host, uint64_t win
         GtkWidget *widget = GTK_WIDGET(win->web_view);
         gtk_widget_set_halign(widget, GTK_ALIGN_START);
         gtk_widget_set_valign(widget, GTK_ALIGN_START);
+        gtk_widget_set_hexpand(widget, FALSE);
+        gtk_widget_set_vexpand(widget, FALSE);
         gtk_widget_set_margin_start(widget, zero_native_webview_coord(x));
         gtk_widget_set_margin_top(widget, zero_native_webview_coord(y));
         int req_w = zero_native_webview_extent(width);
