@@ -504,31 +504,31 @@ static void zero_native_emit_resize(zero_native_gtk_host_t *host, zero_native_gt
     });
 }
 
-static const char *zero_native_shortcut_key_for_keyval(guint keyval, char *buffer, size_t buffer_len) {
+static const char *zero_native_shortcut_key_for_keyval(guint keyval, char *buffer, size_t buffer_len, int *uses_implicit_shift) {
     if (!buffer || buffer_len < 2) return "";
     guint lower = gdk_keyval_to_lower(keyval);
     switch (lower) {
-        case '!': lower = '1'; break;
-        case '@': lower = '2'; break;
-        case '#': lower = '3'; break;
-        case '$': lower = '4'; break;
-        case '%': lower = '5'; break;
-        case '^': lower = '6'; break;
-        case '&': lower = '7'; break;
-        case '*': lower = '8'; break;
-        case '(': lower = '9'; break;
-        case ')': lower = '0'; break;
-        case '+': lower = '='; break;
-        case '_': lower = '-'; break;
-        case '<': lower = ','; break;
-        case '>': lower = '.'; break;
-        case '?': lower = '/'; break;
-        case ':': lower = ';'; break;
-        case '"': lower = '\''; break;
-        case '{': lower = '['; break;
-        case '}': lower = ']'; break;
-        case '|': lower = '\\'; break;
-        case '~': lower = '`'; break;
+        case '!': lower = '1'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '@': lower = '2'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '#': lower = '3'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '$': lower = '4'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '%': lower = '5'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '^': lower = '6'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '&': lower = '7'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '*': lower = '8'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '(': lower = '9'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case ')': lower = '0'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '+': lower = '='; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '_': lower = '-'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '<': lower = ','; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '>': lower = '.'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '?': lower = '/'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case ':': lower = ';'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '"': lower = '\''; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '{': lower = '['; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '}': lower = ']'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '|': lower = '\\'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
+        case '~': lower = '`'; if (uses_implicit_shift) *uses_implicit_shift = 1; break;
         default: break;
     }
     if ((lower >= 'a' && lower <= 'z') || (lower >= '0' && lower <= '9') ||
@@ -543,7 +543,8 @@ static const char *zero_native_shortcut_key_for_keyval(guint keyval, char *buffe
         case GDK_KEY_Escape: return "escape";
         case GDK_KEY_Return:
         case GDK_KEY_KP_Enter: return "enter";
-        case GDK_KEY_Tab: return "tab";
+        case GDK_KEY_Tab:
+        case GDK_KEY_ISO_Left_Tab: return "tab";
         case GDK_KEY_space: return "space";
         case GDK_KEY_BackSpace: return "backspace";
         case GDK_KEY_Left: return "arrowleft";
@@ -554,7 +555,7 @@ static const char *zero_native_shortcut_key_for_keyval(guint keyval, char *buffe
     }
 }
 
-static int zero_native_shortcut_modifiers_match(uint32_t shortcut_modifiers, GdkModifierType event_modifiers) {
+static int zero_native_shortcut_modifiers_match(uint32_t shortcut_modifiers, GdkModifierType event_modifiers, int allow_implicit_shift) {
     int needs_control = (shortcut_modifiers & ZERO_NATIVE_SHORTCUT_MODIFIER_CONTROL) != 0 ||
         (shortcut_modifiers & ZERO_NATIVE_SHORTCUT_MODIFIER_PRIMARY) != 0;
     int needs_option = (shortcut_modifiers & ZERO_NATIVE_SHORTCUT_MODIFIER_OPTION) != 0;
@@ -564,9 +565,10 @@ static int zero_native_shortcut_modifiers_match(uint32_t shortcut_modifiers, Gdk
     int has_option = (event_modifiers & GDK_ALT_MASK) != 0;
     int has_shift = (event_modifiers & GDK_SHIFT_MASK) != 0;
     int has_command = ((event_modifiers & GDK_META_MASK) != 0) || ((event_modifiers & GDK_SUPER_MASK) != 0);
+    int shift_matches = needs_shift ? has_shift : (!has_shift || allow_implicit_shift);
     return has_control == needs_control &&
         has_option == needs_option &&
-        has_shift == needs_shift &&
+        shift_matches &&
         has_command == needs_command;
 }
 
@@ -577,22 +579,27 @@ static gboolean on_shortcut_key_pressed(GtkEventControllerKey *controller, guint
     zero_native_gtk_host_t *host = win ? win->host : NULL;
     if (!host || host->shortcut_count == 0) return FALSE;
     char key_buffer[32];
-    const char *key = zero_native_shortcut_key_for_keyval(keyval, key_buffer, sizeof(key_buffer));
+    int uses_implicit_shift = 0;
+    const char *key = zero_native_shortcut_key_for_keyval(keyval, key_buffer, sizeof(key_buffer), &uses_implicit_shift);
     if (!key || !key[0]) return FALSE;
-    for (int i = 0; i < host->shortcut_count; i++) {
-        zero_native_gtk_shortcut_t *shortcut = &host->shortcuts[i];
-        if (!shortcut->id || !shortcut->key || strcmp(shortcut->key, key) != 0) continue;
-        if (!zero_native_shortcut_modifiers_match(shortcut->modifiers, state)) continue;
-        zero_native_emit(host, (zero_native_gtk_event_t){
-            .kind = ZERO_NATIVE_GTK_EVENT_SHORTCUT,
-            .window_id = win->id,
-            .shortcut_id = shortcut->id,
-            .shortcut_id_len = strlen(shortcut->id),
-            .shortcut_key = shortcut->key,
-            .shortcut_key_len = strlen(shortcut->key),
-            .shortcut_modifiers = shortcut->modifiers,
-        });
-        return TRUE;
+    int pass_count = uses_implicit_shift ? 2 : 1;
+    for (int pass = 0; pass < pass_count; pass++) {
+        int allow_implicit_shift = pass == 1;
+        for (int i = 0; i < host->shortcut_count; i++) {
+            zero_native_gtk_shortcut_t *shortcut = &host->shortcuts[i];
+            if (!shortcut->id || !shortcut->key || strcmp(shortcut->key, key) != 0) continue;
+            if (!zero_native_shortcut_modifiers_match(shortcut->modifiers, state, allow_implicit_shift)) continue;
+            zero_native_emit(host, (zero_native_gtk_event_t){
+                .kind = ZERO_NATIVE_GTK_EVENT_SHORTCUT,
+                .window_id = win->id,
+                .shortcut_id = shortcut->id,
+                .shortcut_id_len = strlen(shortcut->id),
+                .shortcut_key = shortcut->key,
+                .shortcut_key_len = strlen(shortcut->key),
+                .shortcut_modifiers = shortcut->modifiers,
+            });
+            return TRUE;
+        }
     }
     return FALSE;
 }

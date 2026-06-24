@@ -51,7 +51,8 @@ static NSString *ZeroNativeCefFrameworkPath(void);
 static NSString *ZeroNativeOriginForURL(NSURL *url);
 static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url);
 static NSString *ZeroNativeShortcutKeyForEvent(NSEvent *event);
-static BOOL ZeroNativeShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventModifierFlags eventModifiers);
+static BOOL ZeroNativeShortcutUsesImplicitShift(NSString *key, NSEvent *event);
+static BOOL ZeroNativeShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventModifierFlags eventModifiers, BOOL allowImplicitShift);
 
 class ZeroNativeCefBridgeV8Handler final : public CefV8Handler {
 public:
@@ -1245,12 +1246,16 @@ static const char *ZeroNativeCefBridgeScript() {
     if (event.type != NSEventTypeKeyDown) return NO;
     NSString *key = ZeroNativeShortcutKeyForEvent(event);
     if (key.length == 0) return NO;
+    BOOL usesImplicitShift = ZeroNativeShortcutUsesImplicitShift(key, event);
 
-    for (ZeroNativeChromiumShortcut *shortcut in self.shortcuts) {
-        if (![shortcut.key isEqualToString:key]) continue;
-        if (!ZeroNativeShortcutModifiersMatch(shortcut.modifiers, event.modifierFlags)) continue;
-        [self emitShortcutWithId:shortcut.identifier key:shortcut.key modifiers:shortcut.modifiers event:event];
-        return YES;
+    for (NSUInteger pass = 0; pass < (usesImplicitShift ? 2 : 1); pass++) {
+        BOOL allowImplicitShift = pass == 1;
+        for (ZeroNativeChromiumShortcut *shortcut in self.shortcuts) {
+            if (![shortcut.key isEqualToString:key]) continue;
+            if (!ZeroNativeShortcutModifiersMatch(shortcut.modifiers, event.modifierFlags, allowImplicitShift)) continue;
+            [self emitShortcutWithId:shortcut.identifier key:shortcut.key modifiers:shortcut.modifiers event:event];
+            return YES;
+        }
     }
 
     return NO;
@@ -1364,7 +1369,17 @@ static NSString *ZeroNativeShortcutKeyForEvent(NSEvent *event) {
     }
 }
 
-static BOOL ZeroNativeShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventModifierFlags eventModifiers) {
+static BOOL ZeroNativeShortcutUsesImplicitShift(NSString *key, NSEvent *event) {
+    if ((event.modifierFlags & NSEventModifierFlagShift) == 0) return NO;
+    if (key.length != 1) return NO;
+    unichar ch = [key characterAtIndex:0];
+    return (ch >= '0' && ch <= '9') ||
+        ch == '=' || ch == '-' || ch == ',' ||
+        ch == '.' || ch == '/' || ch == ';' || ch == '\'' ||
+        ch == '[' || ch == ']' || ch == '\\' || ch == '`';
+}
+
+static BOOL ZeroNativeShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventModifierFlags eventModifiers, BOOL allowImplicitShift) {
     NSEventModifierFlags flags = eventModifiers & NSEventModifierFlagDeviceIndependentFlagsMask;
     BOOL needsCommand = (shortcutModifiers & ZeroNativeShortcutModifierCommand) != 0 || (shortcutModifiers & ZeroNativeShortcutModifierPrimary) != 0;
     BOOL needsControl = (shortcutModifiers & ZeroNativeShortcutModifierControl) != 0;
@@ -1374,7 +1389,8 @@ static BOOL ZeroNativeShortcutModifiersMatch(uint32_t shortcutModifiers, NSEvent
     BOOL hasControl = (flags & NSEventModifierFlagControl) != 0;
     BOOL hasOption = (flags & NSEventModifierFlagOption) != 0;
     BOOL hasShift = (flags & NSEventModifierFlagShift) != 0;
-    return hasCommand == needsCommand && hasControl == needsControl && hasOption == needsOption && hasShift == needsShift;
+    BOOL shiftMatches = needsShift ? hasShift : (!hasShift || allowImplicitShift);
+    return hasCommand == needsCommand && hasControl == needsControl && hasOption == needsOption && shiftMatches;
 }
 
 static BOOL ZeroNativePolicyListMatches(NSArray<NSString *> *values, NSURL *url) {

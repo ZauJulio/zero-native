@@ -279,7 +279,16 @@ static bool keyDown(int virtual_key) {
     return (GetKeyState(virtual_key) & 0x8000) != 0;
 }
 
-static bool shortcutModifiersMatch(uint32_t shortcut_modifiers) {
+static bool shortcutKeyCanUseImplicitShift(const std::string &key) {
+    if (key.size() != 1) return false;
+    char ch = key[0];
+    return (ch >= '0' && ch <= '9') ||
+        ch == '=' || ch == '-' || ch == ',' ||
+        ch == '.' || ch == '/' || ch == ';' || ch == '\'' ||
+        ch == '[' || ch == ']' || ch == '\\' || ch == '`';
+}
+
+static bool shortcutModifiersMatch(uint32_t shortcut_modifiers, bool allow_implicit_shift) {
     bool needs_control = (shortcut_modifiers & kShortcutModifierControl) != 0 ||
         (shortcut_modifiers & kShortcutModifierPrimary) != 0;
     bool needs_command = (shortcut_modifiers & kShortcutModifierCommand) != 0;
@@ -289,10 +298,11 @@ static bool shortcutModifiersMatch(uint32_t shortcut_modifiers) {
     bool has_command = keyDown(VK_LWIN) || keyDown(VK_RWIN);
     bool has_option = keyDown(VK_MENU);
     bool has_shift = keyDown(VK_SHIFT);
+    bool shift_matches = needs_shift ? has_shift : (!has_shift || allow_implicit_shift);
     return has_control == needs_control &&
         has_command == needs_command &&
         has_option == needs_option &&
-        has_shift == needs_shift;
+        shift_matches;
 }
 
 static const Window *windowForId(Host *host, uint64_t window_id) {
@@ -315,20 +325,25 @@ static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wpara
     if (!window) return false;
     std::string key = shortcutKeyFromWParam(wparam);
     if (key.empty()) return false;
-    for (const Shortcut &shortcut : host->shortcuts) {
-        if (shortcut.key != key) continue;
-        if (!shortcutModifiersMatch(shortcut.modifiers)) continue;
-        if (!host->callback) return true;
-        WindowsEvent event = {};
-        event.kind = kShortcut;
-        event.window_id = window->id;
-        event.shortcut_id = shortcut.id.c_str();
-        event.shortcut_id_len = shortcut.id.size();
-        event.shortcut_key = shortcut.key.c_str();
-        event.shortcut_key_len = shortcut.key.size();
-        event.shortcut_modifiers = shortcut.modifiers;
-        host->callback(host->callback_context, &event);
-        return true;
+    bool uses_implicit_shift = keyDown(VK_SHIFT) && shortcutKeyCanUseImplicitShift(key);
+    const int pass_count = uses_implicit_shift ? 2 : 1;
+    for (int pass = 0; pass < pass_count; ++pass) {
+        bool allow_implicit_shift = pass == 1;
+        for (const Shortcut &shortcut : host->shortcuts) {
+            if (shortcut.key != key) continue;
+            if (!shortcutModifiersMatch(shortcut.modifiers, allow_implicit_shift)) continue;
+            if (!host->callback) return true;
+            WindowsEvent event = {};
+            event.kind = kShortcut;
+            event.window_id = window->id;
+            event.shortcut_id = shortcut.id.c_str();
+            event.shortcut_id_len = shortcut.id.size();
+            event.shortcut_key = shortcut.key.c_str();
+            event.shortcut_key_len = shortcut.key.size();
+            event.shortcut_modifiers = shortcut.modifiers;
+            host->callback(host->callback_context, &event);
+            return true;
+        }
     }
     return false;
 }

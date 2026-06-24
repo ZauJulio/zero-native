@@ -262,7 +262,7 @@ pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateSecurity(manifest.security);
     try validatePlatforms(manifest.platforms);
     try validateWindows(manifest.windows);
-    try validateShortcuts(manifest.shortcuts);
+    try validateShortcutsForPlatforms(manifest.shortcuts, manifest.platforms);
     try validateCefConfig(manifest.package.web_engine, manifest.cef);
     try validatePackageMetadata(manifest.package);
     try validateUpdates(manifest.updates);
@@ -293,6 +293,10 @@ pub fn validateWindows(windows: []const Window) ValidationError!void {
 }
 
 pub fn validateShortcuts(shortcuts: []const Shortcut) ValidationError!void {
+    return validateShortcutsForPlatforms(shortcuts, &.{});
+}
+
+pub fn validateShortcutsForPlatforms(shortcuts: []const Shortcut, platforms: []const PlatformSettings) ValidationError!void {
     if (shortcuts.len > max_shortcuts) return error.InvalidShortcut;
     for (shortcuts, 0..) |shortcut, i| {
         if (shortcut.id.len > max_shortcut_id_bytes) return error.InvalidShortcut;
@@ -301,7 +305,7 @@ pub fn validateShortcuts(shortcuts: []const Shortcut) ValidationError!void {
         if (!shortcutModifiersHasAny(shortcut.modifiers) and shortcutRequiresModifier(shortcut.key)) return error.InvalidShortcut;
         for (shortcuts[0..i]) |previous| {
             if (std.mem.eql(u8, previous.id, shortcut.id)) return error.DuplicateShortcut;
-            if (std.ascii.eqlIgnoreCase(previous.key, shortcut.key) and shortcutModifiersEql(previous.modifiers, shortcut.modifiers)) return error.DuplicateShortcut;
+            if (std.ascii.eqlIgnoreCase(previous.key, shortcut.key) and shortcutModifiersCollide(previous.modifiers, shortcut.modifiers, platforms)) return error.DuplicateShortcut;
         }
     }
 }
@@ -615,6 +619,39 @@ fn shortcutModifiersEql(a: ShortcutModifiers, b: ShortcutModifiers) bool {
         a.shift == b.shift;
 }
 
+fn shortcutModifiersCollide(a: ShortcutModifiers, b: ShortcutModifiers, platforms: []const PlatformSettings) bool {
+    if (shortcutModifiersEql(a, b)) return true;
+
+    var check_macos = platforms.len == 0;
+    var check_control_primary = platforms.len == 0;
+    for (platforms) |settings| {
+        switch (settings.platform) {
+            .macos => check_macos = true,
+            .windows, .linux => check_control_primary = true,
+            .ios, .android, .web, .unknown => {},
+        }
+    }
+
+    if (check_macos and shortcutModifiersEql(resolveShortcutModifiers(a, .command), resolveShortcutModifiers(b, .command))) return true;
+    if (check_control_primary and shortcutModifiersEql(resolveShortcutModifiers(a, .control), resolveShortcutModifiers(b, .control))) return true;
+    return false;
+}
+
+const PrimaryModifierTarget = enum {
+    command,
+    control,
+};
+
+fn resolveShortcutModifiers(modifiers: ShortcutModifiers, primary_target: PrimaryModifierTarget) ShortcutModifiers {
+    var resolved = modifiers;
+    switch (primary_target) {
+        .command => resolved.command = resolved.command or resolved.primary,
+        .control => resolved.control = resolved.control or resolved.primary,
+    }
+    resolved.primary = false;
+    return resolved;
+}
+
 fn shortcutModifiersHasAny(modifiers: ShortcutModifiers) bool {
     return modifiers.primary or modifiers.command or modifiers.control or modifiers.option or modifiers.shift;
 }
@@ -665,6 +702,39 @@ test "manifest validates keyboard shortcuts" {
         },
     };
     try std.testing.expectError(error.DuplicateShortcut, validateManifest(duplicate));
+
+    const windows_alias_duplicate: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .platforms = &.{.{ .platform = .windows }},
+        .shortcuts = &.{
+            .{ .id = "primary", .key = "p", .modifiers = .{ .primary = true } },
+            .{ .id = "control", .key = "p", .modifiers = .{ .control = true } },
+        },
+    };
+    try std.testing.expectError(error.DuplicateShortcut, validateManifest(windows_alias_duplicate));
+
+    const macos_alias_duplicate: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .platforms = &.{.{ .platform = .macos }},
+        .shortcuts = &.{
+            .{ .id = "primary", .key = "p", .modifiers = .{ .primary = true } },
+            .{ .id = "command", .key = "p", .modifiers = .{ .command = true } },
+        },
+    };
+    try std.testing.expectError(error.DuplicateShortcut, validateManifest(macos_alias_duplicate));
+
+    const macos_control_distinct: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .platforms = &.{.{ .platform = .macos }},
+        .shortcuts = &.{
+            .{ .id = "primary", .key = "p", .modifiers = .{ .primary = true } },
+            .{ .id = "control", .key = "p", .modifiers = .{ .control = true } },
+        },
+    };
+    try validateManifest(macos_control_distinct);
 
     const invalid_key: Manifest = .{
         .identity = .{ .id = "com.example.app", .name = "example" },
